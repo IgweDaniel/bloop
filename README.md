@@ -268,17 +268,6 @@ When deposits are detected, events are published to RabbitMQ:
 }
 ```
 
-## Performance Optimizations
-
-### vs TypeScript Implementation
-
-| Metric          | TypeScript | Go Implementation |
-| --------------- | ---------- | ----------------- |
-| Blocks/min      | 10-15      | 50-80             |
-| Memory usage    | 200-400MB  | 50-100MB          |
-| RPC concurrency | 10-20      | 100-200           |
-| CPU efficiency  | Baseline   | +200%             |
-
 ### Key Optimizations
 
 1. **Concurrent Processing**: Goroutines for parallel block/transaction processing
