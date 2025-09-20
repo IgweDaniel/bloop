@@ -1,6 +1,6 @@
 # Bloop Blockchain Monitor
 
-A high-performance, standalone blockchain monitoring service written in Go. Currently supports Ethereum (ETH and USDT) with an extensible architecture for additional blockchains.
+A high-performance, standalone blockchain monitoring service written in Go. Supports Ethereum (ETH and USDT), Binance Smart Chain (BNB and USDT), and Bitcoin (BTC) with a flexible multi-chain architecture designed for easy expansion to additional EVM-compatible and non-EVM blockchains.
 
 ## Features
 
