@@ -257,6 +257,16 @@ func (c *EthereumClient) BlockNumber(ctx context.Context) (uint64, error) {
 	return blockNumber, err
 }
 
+func (c *EthereumClient) HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
+	var header *types.Header
+	err := c.executeWithRetry(ctx, func(client *ethclient.Client) error {
+		var err error
+		header, err = client.HeaderByNumber(ctx, number)
+		return err
+	})
+	return header, err
+}
+
 func (c *EthereumClient) BlockByNumber(ctx context.Context, number *big.Int) (*types.Block, error) {
 	var block *types.Block
 	err := c.executeWithRetry(ctx, func(client *ethclient.Client) error {

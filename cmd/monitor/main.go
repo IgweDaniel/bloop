@@ -55,18 +55,26 @@ func main() {
 	logger.Info("Messaging system initialized")
 
 	trackerManager := blockchain.NewTrackerManager(cfg, storage, publisher, logger)
-	// Start Ethereum tracker
-	if err := trackerManager.StartTracker(ctx, types.Ethereum); err != nil {
-		logger.Fatalf("Failed to start Ethereum tracker: %v", err)
-	}
-	logger.Info("Ethereum tracker started")
+	if cfg.Ethereum.IsActive {
+		if err := trackerManager.StartTracker(ctx, types.Ethereum); err != nil {
+			logger.Fatalf("Failed to start Ethereum tracker: %v", err)
+		}
+		logger.Info("Ethereum tracker started")
 
-	if cfg.Bitcoin.APIURL != "" {
+	}
+
+	if cfg.Bsc.IsActive {
+		if err := trackerManager.StartTracker(ctx, types.BSC); err != nil {
+			logger.Fatalf("Failed to start BSC tracker: %v", err)
+		}
+		logger.Info("BSC tracker started")
+	}
+
+	if cfg.Bitcoin.IsActive {
 		if err := trackerManager.StartTracker(ctx, types.Bitcoin); err != nil {
 			logger.Errorf("Failed to start Bitcoin tracker: %v", err)
-		} else {
-			logger.Info("Bitcoin tracker started")
 		}
+		logger.Info("Bitcoin tracker started")
 	}
 
 	// Start HTTP API server

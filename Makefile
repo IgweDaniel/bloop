@@ -8,6 +8,9 @@ build:
 build-listener:
 	go build -o bin/test-listener ./cmd/test-listener
 
+run-listener: build-listener
+	bash scripts/test-listener.sh
+
 # Build both applications
 build-all: build build-listener
 

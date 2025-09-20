@@ -176,6 +176,9 @@ func (tl *TestListener) handleMessage(msg amqp091.Delivery) {
 	fmt.Printf("📦 Block:        %d\n", depositEvent.BlockNumber)
 	fmt.Printf("⏰ Tx Time:      %s\n", depositEvent.Timestamp.Format("2006-01-02 15:04:05"))
 	fmt.Printf("📥 Received:     %s\n", receivedAt.Format("2006-01-02 15:04:05.000"))
+	// Calculate the time difference between when the tx happened and when we received the event
+	timeDiff := receivedAt.Sub(depositEvent.Timestamp).Seconds()
+	fmt.Printf("⏳ Delay:        %.3f seconds\n", timeDiff)
 
 	if depositEvent.NetworkFee != "" {
 		fmt.Printf("💸 Network Fee:  %s\n", depositEvent.NetworkFee)

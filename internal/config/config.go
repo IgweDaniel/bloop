@@ -15,6 +15,7 @@ type Config struct {
 	RabbitMQ   RabbitMQConfig   `mapstructure:"rabbitmq"`
 	Ethereum   EthereumConfig   `mapstructure:"ethereum"`
 	Bitcoin    BitcoinConfig    `mapstructure:"bitcoin"`
+	Bsc        EthereumConfig   `mapstructure:"bsc"`
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
 }
@@ -46,12 +47,15 @@ type EthereumConfig struct {
 	WSURL               string        `mapstructure:"ws_url"`
 	OminiRPCURL         string        `mapstructure:"omini_rpc_url"`
 	USDTContract        string        `mapstructure:"usdt_contract"`
+	USDTDecimals        int32         `mapstructure:"usdt_decimals"`
 	Confirmations       int           `mapstructure:"confirmations"`
 	BatchSize           int           `mapstructure:"batch_size"`
 	MaxConcurrentBlocks int           `mapstructure:"max_concurrent_blocks"`
 	RPCTimeout          time.Duration `mapstructure:"rpc_timeout"`
 	RetryAttempts       int           `mapstructure:"retry_attempts"`
 	RetryDelay          time.Duration `mapstructure:"retry_delay"`
+	IsActive            bool          `mapstructure:"is_active"`
+	SkipNative          bool          `mapstructure:"skip_native"` // if true, skip checking native; if false (zero value), check native
 }
 
 // BitcoinConfig contains Bitcoin-specific configuration
@@ -64,6 +68,7 @@ type BitcoinConfig struct {
 	RPCTimeout          time.Duration `mapstructure:"rpc_timeout"`
 	RetryAttempts       int           `mapstructure:"retry_attempts"`
 	RetryDelay          time.Duration `mapstructure:"retry_delay"`
+	IsActive            bool          `mapstructure:"is_active"`
 }
 type MonitoringConfig struct {
 	ScanWindow          int           `mapstructure:"scan_window"`

@@ -17,6 +17,7 @@ import (
 	"github.com/igwedaniel/bloop/internal/config"
 	"github.com/igwedaniel/bloop/internal/storage"
 	bloopTypes "github.com/igwedaniel/bloop/internal/types"
+	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/semaphore"
 )
@@ -39,6 +40,7 @@ type EthereumProcessor struct {
 	usdtABI      abi.ABI
 	baseTracker  *base.BaseTracker
 
+	network      bloopTypes.BlockchainType
 	rpcSemaphore *semaphore.Weighted
 }
 
@@ -46,6 +48,7 @@ func NewEthereumProcessor(
 	cfg *config.EthereumConfig,
 	storage storage.Storage,
 	logger *logrus.Logger,
+	network bloopTypes.BlockchainType,
 ) (*EthereumProcessor, error) {
 	usdtAbi, err := abi.JSON(strings.NewReader(usdtABI))
 	if err != nil {
@@ -58,6 +61,7 @@ func NewEthereumProcessor(
 		logger:       logger,
 		usdtContract: common.HexToAddress(cfg.USDTContract),
 		usdtABI:      usdtAbi,
+		network:      network,
 		rpcSemaphore: semaphore.NewWeighted(50),
 	}
 
@@ -69,14 +73,14 @@ func (ep *EthereumProcessor) SetBaseTracker(baseTracker *base.BaseTracker) {
 }
 
 func (ep *EthereumProcessor) GetNetwork() bloopTypes.BlockchainType {
-	return bloopTypes.Ethereum
+	return ep.network
 }
 
 // InitializeProviders sets up RPC connections and providers
 func (ep *EthereumProcessor) InitializeProviders(ctx context.Context) error {
 	client, err := NewEthereumClient(ep.config, ep.logger)
 	if err != nil {
-		return fmt.Errorf("failed to create Ethereum client: %w", err)
+		return fmt.Errorf("failed to create %s client: %w", ep.network, err)
 	}
 
 	ep.client = client
@@ -93,7 +97,7 @@ func (ep *EthereumProcessor) InitializeProviders(ctx context.Context) error {
 		}
 	}
 
-	ep.logger.Info("Ethereum providers initialized successfully")
+	ep.logger.Infof("%s providers initialized successfully", ep.network)
 	return nil
 }
 
@@ -189,7 +193,7 @@ func (ep *EthereumProcessor) ProcessBlock(ctx context.Context, blockNumber uint6
 	}
 
 	// Get processed transactions for this block
-	processedTxs, err := ep.storage.GetProcessedTransactions(ctx, bloopTypes.Ethereum, blockNumber)
+	processedTxs, err := ep.storage.GetProcessedTransactions(ctx, ep.network, blockNumber)
 	if err != nil {
 		return false, fmt.Errorf("failed to get processed transactions: %w", err)
 	}
@@ -216,7 +220,7 @@ func (ep *EthereumProcessor) ProcessBlock(ctx context.Context, blockNumber uint6
 	}
 
 	// Clean up progress tracking
-	if err := ep.storage.ClearBlockProgress(ctx, bloopTypes.Ethereum, blockNumber); err != nil {
+	if err := ep.storage.ClearBlockProgress(ctx, ep.network, blockNumber); err != nil {
 		ep.logger.Errorf("Failed to clear block progress: %v", err)
 	}
 
@@ -254,7 +258,7 @@ func (ep *EthereumProcessor) processBatch(ctx context.Context, batch types.Trans
 			}
 
 			// Mark transaction as processed
-			if err := ep.storage.AddProcessedTransaction(ctx, bloopTypes.Ethereum, blockNumber, transaction.Hash().Hex()); err != nil {
+			if err := ep.storage.AddProcessedTransaction(ctx, ep.network, blockNumber, transaction.Hash().Hex()); err != nil {
 				ep.logger.Errorf("Failed to mark transaction as processed: %v", err)
 			}
 		}(tx)
@@ -274,8 +278,11 @@ func (ep *EthereumProcessor) processBatch(ctx context.Context, batch types.Trans
 }
 
 func (ep *EthereumProcessor) processTransaction(ctx context.Context, tx *types.Transaction, blockNumber uint64) error {
-	if err := ep.processETHTransaction(ctx, tx, blockNumber); err != nil {
-		ep.logger.Errorf("Failed to process ETH transaction %s: %v", tx.Hash().Hex(), err)
+	// Optionally skip native processing (useful for BSC where we focus on tokens)
+	if !ep.config.SkipNative {
+		if err := ep.processETHTransaction(ctx, tx, blockNumber); err != nil {
+			ep.logger.Errorf("Failed to process native transaction %s: %v", tx.Hash().Hex(), err)
+		}
 	}
 
 	if err := ep.processUSDTTransaction(ctx, tx, blockNumber); err != nil {
@@ -302,7 +309,7 @@ func (ep *EthereumProcessor) processETHTransaction(ctx context.Context, tx *type
 		return nil
 	}
 
-	walletID, isWatched, err := ep.storage.IsWatchedWallet(ctx, bloopTypes.Ethereum, tx.To().Hex())
+	walletID, isWatched, err := ep.storage.IsWatchedWallet(ctx, ep.network, tx.To().Hex())
 	if err != nil {
 		return fmt.Errorf("failed to check watched wallet: %w", err)
 	}
@@ -345,13 +352,13 @@ func (ep *EthereumProcessor) processETHTransaction(ctx context.Context, tx *type
 		TxHash:        tx.Hash().Hex(),
 		WalletID:      walletID,
 		WalletAddress: tx.To().Hex(),
-		FromAddress:   ep.getFromAddress(tx, receipt),
+		FromAddress:   ep.getFromAddress(tx),
 		Amount:        formatEther(tx.Value()),
 		Currency:      bloopTypes.ETH,
-		Network:       bloopTypes.Ethereum,
+		Network:       ep.network,
 		BlockNumber:   blockNumber,
 		Confirmations: 1,
-		Timestamp:     time.Now(),
+		Timestamp:     ep.BlockToTimestamp(ctx, blockNumber),
 		NetworkFee:    formatEther(networkFee),
 		Status:        bloopTypes.StatusConfirmed,
 		RawData: map[string]interface{}{
@@ -414,7 +421,7 @@ func (ep *EthereumProcessor) processUSDTTransaction(ctx context.Context, tx *typ
 		to := common.HexToAddress(log.Topics[2].Hex())
 
 		// Check if recipient is a watched wallet
-		walletID, isWatched, err := ep.storage.IsWatchedWallet(ctx, bloopTypes.Ethereum, to.Hex())
+		walletID, isWatched, err := ep.storage.IsWatchedWallet(ctx, ep.network, to.Hex())
 		if err != nil {
 			ep.logger.Errorf("Failed to check watched wallet: %v", err)
 			continue
@@ -458,12 +465,13 @@ func (ep *EthereumProcessor) processUSDTTransaction(ctx context.Context, tx *typ
 			WalletID:      walletID,
 			WalletAddress: to.Hex(),
 			FromAddress:   from.Hex(),
-			Amount:        formatUSDT(amount),
+			// FIXIME: take from config, the decimals
+			Amount:        formatToken(amount, ep.config.USDTDecimals),
 			Currency:      bloopTypes.USDT,
-			Network:       bloopTypes.Ethereum,
+			Network:       ep.network,
 			BlockNumber:   blockNumber,
 			Confirmations: 1,
-			Timestamp:     time.Now(),
+			Timestamp:     ep.BlockToTimestamp(ctx, blockNumber),
 			NetworkFee:    formatEther(networkFee),
 			Status:        bloopTypes.StatusConfirmed,
 			RawData: map[string]interface{}{
@@ -485,7 +493,7 @@ func (ep *EthereumProcessor) processUSDTTransaction(ctx context.Context, tx *typ
 	return nil
 }
 
-func (ep *EthereumProcessor) getFromAddress(tx *types.Transaction, receipt *types.Receipt) string {
+func (ep *EthereumProcessor) getFromAddress(tx *types.Transaction) string {
 	signer := types.NewEIP155Signer(tx.ChainId())
 	from, err := types.Sender(signer, tx)
 	if err != nil {
@@ -495,9 +503,10 @@ func (ep *EthereumProcessor) getFromAddress(tx *types.Transaction, receipt *type
 }
 
 func formatEther(wei *big.Int) string {
-	ether := new(big.Float).SetInt(wei)
-	ether.Quo(ether, big.NewFloat(1e18))
-	return ether.Text('f', 18)
+	if wei == nil {
+		return "0"
+	}
+	return decimal.NewFromBigInt(wei, -18).StringFixed(18)
 }
 
 // getBlockTransactions fetches block with a short-lived cache to reduce quoted omini calls
@@ -542,9 +551,28 @@ func (ep *EthereumProcessor) getBlockTransactions(ctx context.Context, blockNumb
 	return block, nil
 }
 
-func formatUSDT(amount *big.Int) string {
-	// Convert to USDT (6 decimals)
-	usdt := new(big.Float).SetInt(amount)
-	usdt.Quo(usdt, big.NewFloat(1e6))
-	return usdt.Text('f', 6)
+func formatToken(amount *big.Int, decimals int32) string {
+	if amount == nil {
+		return "0"
+	}
+	if decimals < 0 {
+		decimals = 0
+	}
+	return decimal.NewFromBigInt(amount, -decimals).StringFixed(decimals)
+}
+
+func (ep *EthereumProcessor) getHeaderByNumber(ctx context.Context, blockNumber uint64) (*types.Header, error) {
+	return ep.client.HeaderByNumber(ctx, big.NewInt(int64(blockNumber)))
+}
+
+// BlockToTimestamp returns the timestamp (as time.Time) for a given block number.
+// It fetches the block using the processor's block fetching logic.
+func (ep *EthereumProcessor) BlockToTimestamp(ctx context.Context, blockNumber uint64) time.Time {
+	block, err := ep.getHeaderByNumber(ctx, blockNumber)
+	if err != nil {
+		ep.logger.Errorf("Failed to get header by number %d: %v", blockNumber, err)
+		return time.Now()
+	}
+	// Block time is in seconds since epoch (uint64)
+	return time.Unix(int64(block.Time), 0)
 }

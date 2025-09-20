@@ -54,3 +54,18 @@ bitcoin:
   rpc_timeout: 30s
   retry_attempts: 3
   retry_delay: 2s
+
+bsc:
+  rpc_urls:
+    - "https://bsc-testnet.public.blastapi.io"
+    - "https://bsc-testnet-rpc.publicnode.com"
+  ws_url: "wss://bsc-testnet-rpc.publicnode.com"
+  omini_rpc_url: "https://bsc-testnet-rpc.publicnode.com"
+  usdt_contract: "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd"
+  confirmations: 5
+  batch_size: 50
+  max_concurrent_blocks: 20
+  rpc_timeout: 30s
+  retry_attempts: 3
+  retry_delay: 2s
+  is_active: true
