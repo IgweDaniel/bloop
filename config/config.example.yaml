@@ -1,0 +1,46 @@
+server:
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+
+redis:
+  url: "redis://localhost:6377"
+  pool_size: 100
+  min_idle_conns: 10
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+
+rabbitmq:
+  url: "amqp://bloop:bloop123@localhost:5673/"
+  exchange: "blockchain.events"
+  queue_prefix: "bloop"
+  prefetch_count: 100
+
+ethereum:
+  rpc_urls:
+    - "https://ethereum-sepolia-rpc.publicnode.com"
+    - "https://eth-sepolia.public.blastapi.io"
+  ws_url: "wss://ethereum-sepolia-rpc.publicnode.com"
+  # Optional: RPC with extended features suitable for fetching full blocks with transactions.
+  # e.g., an Alchemy URL or any provider that reliably returns full blocks.
+  # Do not commit secrets here.
+  omini_rpc_url: ""
+  usdt_contract: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+  confirmations: 5
+  batch_size: 50
+  max_concurrent_blocks: 5
+  rpc_timeout: 30s
+  retry_attempts: 3
+  retry_delay: 2s
+
+monitoring:
+  scan_window: 1000
+  poll_interval: 15s
+  ws_retry_interval: 30s
+  health_check_interval: 30s
+  metrics_port: 9090
+
+logging:
+  level: "info"
+  format: "json"

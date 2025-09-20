@@ -1,0 +1,57 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: bloop-redis
+    ports:
+      - "6377:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - bloop-network
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: bloop-rabbitmq
+    ports:
+      - "5673:5672"
+      - "15678:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: bloop
+      RABBITMQ_DEFAULT_PASS: bloop123
+      RABBITMQ_DEFAULT_VHOST: /
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - bloop-network
+
+  # bloop-monitor:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: bloop-monitor
+  #   depends_on:
+  #     - redis
+  #     - rabbitmq
+  #   environment:
+  #     - REDIS_URL=redis://redis:6379
+  #     - RABBITMQ_URL=amqp://bloop:bloop123@rabbitmq:5672/
+  #     - LOG_LEVEL=info
+  #     - ETH_RPC_URLS=https://eth.llamarpc.com,https://rpc.ankr.com/eth
+  #     - ETH_WS_URL=wss://eth.llamarpc.com
+  #     - USDT_CONTRACT_ADDRESS=0xdAC17F958D2ee523a2206206994597C13D831ec7
+  #   volumes:
+  #     - ./config:/app/config
+  #   networks:
+  #     - bloop-network
+  #   restart: unless-stopped
+
+volumes:
+  redis_data:
+  rabbitmq_data:
+
+networks:
+  bloop-network:
+    driver: bridge
