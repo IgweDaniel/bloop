@@ -44,3 +44,13 @@ monitoring:
 logging:
   level: "info"
   format: "json"
+
+bitcoin:
+  api_url: "https://mempool.space/testnet/api"
+  ws_url: "wss://mempool.space/testnet/api/v1/ws"
+  confirmations: 1
+  batch_size: 20
+  max_concurrent_blocks: 2
+  rpc_timeout: 30s
+  retry_attempts: 3
+  retry_delay: 2s

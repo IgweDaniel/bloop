@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/igwedaniel/bloop/internal/blockchain/base"
+	"github.com/igwedaniel/bloop/internal/blockchain/bitcoin"
 	"github.com/igwedaniel/bloop/internal/blockchain/ethereum"
 	"github.com/igwedaniel/bloop/internal/config"
 	"github.com/igwedaniel/bloop/internal/messaging"
@@ -89,6 +90,22 @@ func (tm *TrackerManager) StartTracker(ctx context.Context, network types.Blockc
 		bt := base.NewBaseTracker(proc, tm.storage, tm.publisher, tm.logger, baseCfg)
 		proc.SetBaseTracker(bt)
 		tracker = bt
+	case types.Bitcoin:
+		bproc, perr := bitcoin.NewBitcoinProcessor(&tm.cfg.Bitcoin, tm.storage, tm.logger)
+		if perr != nil {
+			return fmt.Errorf("failed to create Bitcoin processor: %w", perr)
+		}
+		bcfg := base.BaseTrackerConfig{
+			Confirmations:       tm.cfg.Bitcoin.Confirmations,
+			BatchSize:           tm.cfg.Bitcoin.BatchSize,
+			MaxConcurrentBlocks: tm.cfg.Bitcoin.MaxConcurrentBlocks,
+			PollInterval:        15 * time.Second,
+			CatchupBatchSize:    50,
+			HealthCheckInterval: 30 * time.Second,
+		}
+		bbt := base.NewBaseTracker(bproc, tm.storage, tm.publisher, tm.logger, bcfg)
+		bproc.SetBaseTracker(bbt)
+		tracker = bbt
 	default:
 		err = fmt.Errorf("unsupported blockchain network: %s", network)
 	}

@@ -54,14 +54,20 @@ func main() {
 	defer publisher.Close()
 	logger.Info("Messaging system initialized")
 
-	// Create tracker manager (factory inlined)
 	trackerManager := blockchain.NewTrackerManager(cfg, storage, publisher, logger)
-
 	// Start Ethereum tracker
 	if err := trackerManager.StartTracker(ctx, types.Ethereum); err != nil {
 		logger.Fatalf("Failed to start Ethereum tracker: %v", err)
 	}
 	logger.Info("Ethereum tracker started")
+
+	if cfg.Bitcoin.APIURL != "" {
+		if err := trackerManager.StartTracker(ctx, types.Bitcoin); err != nil {
+			logger.Errorf("Failed to start Bitcoin tracker: %v", err)
+		} else {
+			logger.Info("Bitcoin tracker started")
+		}
+	}
 
 	// Start HTTP API server
 	apiServer := api.NewServer(&cfg.Server, trackerManager, storage, logger)

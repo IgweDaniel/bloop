@@ -2,8 +2,15 @@ package bitcoin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/url"
+	"time"
 
+	"errors"
+	"net"
+
+	"github.com/gorilla/websocket"
 	"github.com/igwedaniel/bloop/internal/blockchain/base"
 	"github.com/igwedaniel/bloop/internal/config"
 	"github.com/igwedaniel/bloop/internal/storage"
@@ -11,112 +18,164 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// BitcoinProcessor implements the BlockProcessor interface for Bitcoin
 type BitcoinProcessor struct {
 	storage     storage.Storage
-	config      *config.BitcoinConfig // TODO: Add to config
+	config      *config.BitcoinConfig
 	logger      *logrus.Logger
 	baseTracker *base.BaseTracker
+	rpc         Client
+	wsURL       string
 }
 
-// NewBitcoinProcessor creates a new Bitcoin block processor
 func NewBitcoinProcessor(
 	cfg *config.BitcoinConfig,
 	storage storage.Storage,
 	logger *logrus.Logger,
 ) (*BitcoinProcessor, error) {
-	processor := &BitcoinProcessor{
+	return &BitcoinProcessor{
 		storage: storage,
 		config:  cfg,
 		logger:  logger,
-	}
-
-	return processor, nil
+	}, nil
 }
 
-// SetBaseTracker sets the reference to the base tracker
 func (bp *BitcoinProcessor) SetBaseTracker(baseTracker *base.BaseTracker) {
 	bp.baseTracker = baseTracker
 }
+func (bp *BitcoinProcessor) GetNetwork() types.BlockchainType { return types.Bitcoin }
 
-// GetNetwork returns the blockchain network type
-func (bp *BitcoinProcessor) GetNetwork() types.BlockchainType {
-	return types.Bitcoin
-}
-
-// InitializeProviders sets up Bitcoin RPC connections
 func (bp *BitcoinProcessor) InitializeProviders(ctx context.Context) error {
-	// TODO: Initialize Bitcoin RPC client
-	bp.logger.Info("Bitcoin providers initialized successfully")
+	// Prefer REST API if configured; else use JSON-RPC
+	rc, err := newRESTClient(bp.config)
+	if err != nil {
+		return err
+	}
+	bp.rpc = rc
+	bp.wsURL = bp.config.WSURL
+	bp.logger.Info("Bitcoin RPC initialized")
 	return nil
 }
 
-// CleanupProviders closes connections and cleans up resources
-func (bp *BitcoinProcessor) CleanupProviders() error {
-	// TODO: Cleanup Bitcoin connections
-	return nil
-}
+func (bp *BitcoinProcessor) CleanupProviders() error { return nil }
 
-// GetCurrentBlockHeight returns the current block height from Bitcoin network
 func (bp *BitcoinProcessor) GetCurrentBlockHeight(ctx context.Context) (uint64, error) {
-	// TODO: Implement Bitcoin block height fetching
-	return 0, fmt.Errorf("Bitcoin implementation not complete")
+	return bp.rpc.GetBlockCount(ctx)
 }
 
-// SubscribeToNewBlocks sets up real-time Bitcoin block notifications
 func (bp *BitcoinProcessor) SubscribeToNewBlocks(ctx context.Context, blockCh chan<- uint64) error {
-	// TODO: Implement Bitcoin WebSocket or polling subscription
-	return fmt.Errorf("Bitcoin real-time subscription not implemented")
-}
+	if bp.wsURL == "" {
+		return fmt.Errorf("ws_url not configured")
+	}
 
-// ProcessBlock processes a single Bitcoin block
-func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64) (bool, error) {
-	// TODO: Implement Bitcoin block processing
-	// 1. Get block from Bitcoin RPC
-	// 2. Process transactions
-	// 3. Check for deposits to watched addresses
-	// 4. Publish deposit events using bp.baseTracker.PublishDeposit()
+	u, err := url.Parse(bp.wsURL)
+	if err != nil {
+		return fmt.Errorf("invalid ws_url: %w", err)
+	}
 
-	bp.logger.Debugf("Processing Bitcoin block %d (not implemented)", blockNumber)
-	return true, nil
-}
+	dialer := websocket.Dialer{}
+	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("ws dial failed: %w", err)
+	}
 
-// Example of how Bitcoin transaction processing would work:
-/*
-func (bp *BitcoinProcessor) processBitcoinTransaction(ctx context.Context, tx *BitcoinTransaction, blockNumber uint64) error {
-	// Check if any outputs go to watched addresses
-	for _, output := range tx.Outputs {
-		walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, output.Address)
+	// request block notifications (per TS: {action:"want", data:["blocks"]})
+	_ = conn.WriteJSON(map[string]interface{}{"action": "want", "data": []string{"blocks"}})
+
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
+
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
+
+	type wsBlockMsg struct {
+		Block struct {
+			Height uint64 `json:"height"`
+		} `json:"block"`
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		_, message, err := conn.ReadMessage()
 		if err != nil {
-			return err
+			if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			if websocket.IsCloseError(err) {
+				return nil
+			}
+			return fmt.Errorf("ws read failed: %w", err)
 		}
-		if !isWatched {
-			continue
-		}
-
-		// Create deposit event
-		deposit := &types.WalletDeposit{
-			TxHash:        tx.Hash,
-			WalletID:      walletID,
-			WalletAddress: output.Address,
-			FromAddress:   "", // Bitcoin doesn't have a single from address
-			Amount:        satoshiToBTC(output.Value),
-			Currency:      types.BTC,
-			Network:       types.Bitcoin,
-			BlockNumber:   blockNumber,
-			Confirmations: 1,
-			Timestamp:     time.Now(),
-			NetworkFee:    calculateBitcoinFee(tx),
-			Status:        types.StatusConfirmed,
+		var evt wsBlockMsg
+		if err := json.Unmarshal(message, &evt); err == nil && evt.Block.Height > 0 {
+			select {
+			case blockCh <- evt.Block.Height:
+			default:
+			}
 		}
 
-		// Publish using base tracker
-		if bp.baseTracker != nil {
-			if err := bp.baseTracker.PublishDeposit(ctx, deposit); err != nil {
-				return err
+		select {
+		case <-pingTicker.C:
+			if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second)); err != nil {
+				return fmt.Errorf("ws ping failed: %w", err)
+			}
+		default:
+		}
+	}
+}
+
+func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64) (bool, error) {
+	hash, err := bp.rpc.GetBlockHash(ctx, blockNumber)
+	if err != nil {
+		return false, err
+	}
+	// verbosity 2 returns decoded txs
+	block, err := bp.rpc.GetBlockVerbose(ctx, hash)
+	if err != nil {
+		return false, err
+	}
+
+	for _, tx := range block.Tx {
+		for _, vout := range tx.Vout {
+			if len(vout.ScriptPubKey.Addresses) == 0 {
+				continue
+			}
+			for _, addr := range vout.ScriptPubKey.Addresses {
+				walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, addr)
+				if err != nil {
+					return false, err
+				}
+				if !isWatched {
+					continue
+				}
+
+				dep := &types.WalletDeposit{
+					TxHash:        tx.Txid,
+					WalletID:      walletID,
+					WalletAddress: addr,
+					FromAddress:   "",
+					Amount:        fmt.Sprintf("%.8f", vout.Value),
+					Currency:      types.BTC,
+					Network:       types.Bitcoin,
+					BlockNumber:   blockNumber,
+					Confirmations: 1,
+					Timestamp:     time.Unix(block.Time, 0),
+					NetworkFee:    "",
+					Status:        types.StatusConfirmed,
+				}
+				if bp.baseTracker != nil {
+					if err := bp.baseTracker.PublishDeposit(ctx, dep); err != nil {
+						bp.logger.Errorf("publish deposit: %v", err)
+					}
+				}
 			}
 		}
 	}
-	return nil
+	return true, nil
 }
-*/

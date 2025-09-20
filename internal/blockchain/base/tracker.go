@@ -2,7 +2,10 @@ package base
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +63,9 @@ type BaseTracker struct {
 	wg        sync.WaitGroup
 	mu        sync.RWMutex
 
+	runCtx    context.Context
+	runCancel context.CancelFunc
+
 	processedBlocks uint64
 	processedTxs    uint64
 	errorCount      uint64
@@ -104,21 +110,22 @@ func (bt *BaseTracker) Start(ctx context.Context) error {
 	bt.logger.Infof("Starting %s tracker...", network)
 
 	// Initialize blockchain-specific providers
-	if err := bt.processor.InitializeProviders(ctx); err != nil {
+	bt.runCtx, bt.runCancel = context.WithCancel(ctx)
+	if err := bt.processor.InitializeProviders(bt.runCtx); err != nil {
 		bt.isRunning = false
 		return fmt.Errorf("failed to initialize providers: %w", err)
 	}
 
 	bt.wg.Add(1)
-	go bt.blockProcessorLoop(ctx)
+	go bt.blockProcessorLoop(bt.runCtx)
 
 	bt.wg.Add(1)
-	go bt.blockSubscriptionLoop(ctx)
+	go bt.blockSubscriptionLoop(bt.runCtx)
 
 	bt.wg.Add(1)
-	go bt.healthMonitorLoop(ctx)
+	go bt.healthMonitorLoop(bt.runCtx)
 
-	go bt.performInitialCatchup(ctx)
+	go bt.performInitialCatchup(bt.runCtx)
 
 	bt.logger.Infof("%s tracker started successfully", network)
 	return nil
@@ -137,6 +144,9 @@ func (bt *BaseTracker) Stop() error {
 	network := bt.processor.GetNetwork()
 	bt.logger.Infof("Stopping %s tracker...", network)
 
+	if bt.runCancel != nil {
+		bt.runCancel()
+	}
 	close(bt.stopCh)
 	bt.wg.Wait()
 
@@ -162,15 +172,22 @@ func (bt *BaseTracker) GetStats() types.TrackerStats {
 
 	lastBlock, _ := bt.storage.GetLastProcessedBlock(context.Background(), bt.processor.GetNetwork())
 
+	currentBlock, err := bt.processor.GetCurrentBlockHeight(context.Background())
+	if err != nil {
+		bt.logger.Errorf("Failed to get current block number: %v", err)
+		currentBlock = 0
+	}
+
 	return types.TrackerStats{
-		Network:         bt.processor.GetNetwork(),
-		IsRunning:       bt.isRunning,
-		ProcessedBlocks: bt.processedBlocks,
-		ProcessedTxs:    bt.processedTxs,
-		WatchedWallets:  len(watchedWallets),
-		LastBlockHeight: lastBlock,
-		Uptime:          time.Since(bt.startTime).String(),
-		ErrorCount:      bt.errorCount,
+		Network:            bt.processor.GetNetwork(),
+		IsRunning:          bt.isRunning,
+		ProcessedBlocks:    bt.processedBlocks,
+		ProcessedTxs:       bt.processedTxs,
+		WatchedWallets:     len(watchedWallets),
+		LastBlockHeight:    lastBlock,
+		CurrentBlockHeight: currentBlock,
+		Uptime:             time.Since(bt.startTime).String(),
+		ErrorCount:         bt.errorCount,
 	}
 }
 
@@ -222,8 +239,10 @@ func (bt *BaseTracker) blockSubscriptionLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			cancel()
 			return
 		case <-bt.stopCh:
+			cancel()
 			return
 		case <-ticker.C:
 			bt.performPolling(ctx)
@@ -277,7 +296,7 @@ func (bt *BaseTracker) performInitialCatchup(ctx context.Context) {
 
 	// Check if we're already ahead or very close to current block
 	if lastProcessed >= currentBlock {
-		bt.logger.Infof("%s tracker is ahead of current block - last processed: %d, current: %d (will wait for new blocks)",
+		bt.logger.Infof("%s tracker is already up to date - last processed: %d, current: %d (will wait for new blocks)",
 			network, lastProcessed, currentBlock)
 		return
 	}
@@ -377,6 +396,9 @@ func (bt *BaseTracker) enqueueBlock(ctx context.Context, blockNumber uint64, sou
 	go func() {
 		defer bt.blockSemaphore.Release(1)
 		if err := bt.processBlockSafely(ctx, blockNumber, source); err != nil {
+			if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
+				return
+			}
 			bt.logger.Errorf("Failed to process %s block %d from %s: %v", network, blockNumber, source, err)
 			bt.errorCount++
 		}
@@ -391,6 +413,12 @@ func (bt *BaseTracker) processBlockSafely(ctx context.Context, blockNumber uint6
 	// Check confirmations
 	currentBlock, err := bt.processor.GetCurrentBlockHeight(ctx)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+			return nil
+		}
+		if strings.Contains(err.Error(), "context canceled") || strings.Contains(err.Error(), "use of closed network connection") {
+			return nil
+		}
 		return fmt.Errorf("failed to get current block height: %w", err)
 	}
 

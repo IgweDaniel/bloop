@@ -14,6 +14,7 @@ type Config struct {
 	Redis      RedisConfig      `mapstructure:"redis"`
 	RabbitMQ   RabbitMQConfig   `mapstructure:"rabbitmq"`
 	Ethereum   EthereumConfig   `mapstructure:"ethereum"`
+	Bitcoin    BitcoinConfig    `mapstructure:"bitcoin"`
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
 }
@@ -53,6 +54,17 @@ type EthereumConfig struct {
 	RetryDelay          time.Duration `mapstructure:"retry_delay"`
 }
 
+// BitcoinConfig contains Bitcoin-specific configuration
+type BitcoinConfig struct {
+	APIURL              string        `mapstructure:"api_url"`
+	WSURL               string        `mapstructure:"ws_url"`
+	Confirmations       int           `mapstructure:"confirmations"`
+	BatchSize           int           `mapstructure:"batch_size"`
+	MaxConcurrentBlocks int           `mapstructure:"max_concurrent_blocks"`
+	RPCTimeout          time.Duration `mapstructure:"rpc_timeout"`
+	RetryAttempts       int           `mapstructure:"retry_attempts"`
+	RetryDelay          time.Duration `mapstructure:"retry_delay"`
+}
 type MonitoringConfig struct {
 	ScanWindow          int           `mapstructure:"scan_window"`
 	PollInterval        time.Duration `mapstructure:"poll_interval"`
@@ -116,6 +128,15 @@ func setDefaults() {
 	viper.SetDefault("ethereum.retry_attempts", 3)
 	viper.SetDefault("ethereum.retry_delay", "2s")
 
+	viper.SetDefault("bitcoin.confirmations", 1)
+	viper.SetDefault("bitcoin.batch_size", 20)
+	viper.SetDefault("bitcoin.max_concurrent_blocks", 2)
+	viper.SetDefault("bitcoin.rpc_timeout", "30s")
+	viper.SetDefault("bitcoin.retry_attempts", 3)
+	viper.SetDefault("bitcoin.retry_delay", "2s")
+	viper.SetDefault("bitcoin.ws_url", "")
+	viper.SetDefault("bitcoin.api_url", "")
+
 	viper.SetDefault("monitoring.scan_window", 1000)
 	viper.SetDefault("monitoring.poll_interval", "15s")
 	viper.SetDefault("monitoring.ws_retry_interval", "30s")
@@ -141,6 +162,21 @@ func overrideWithEnv() {
 	}
 	if rabbitURL := os.Getenv("RABBITMQ_URL"); rabbitURL != "" {
 		viper.Set("rabbitmq.url", rabbitURL)
+	}
+	if btcURL := os.Getenv("BTC_RPC_URL"); btcURL != "" {
+		viper.Set("bitcoin.rpc_url", btcURL)
+	}
+	if btcWS := os.Getenv("BTC_WS_URL"); btcWS != "" {
+		viper.Set("bitcoin.ws_url", btcWS)
+	}
+	if btcAPI := os.Getenv("BTC_API_URL"); btcAPI != "" {
+		viper.Set("bitcoin.api_url", btcAPI)
+	}
+	if btcUser := os.Getenv("BTC_RPC_USER"); btcUser != "" {
+		viper.Set("bitcoin.username", btcUser)
+	}
+	if btcPass := os.Getenv("BTC_RPC_PASS"); btcPass != "" {
+		viper.Set("bitcoin.password", btcPass)
 	}
 	if logLevel := os.Getenv("LOG_LEVEL"); logLevel != "" {
 		viper.Set("logging.level", logLevel)
