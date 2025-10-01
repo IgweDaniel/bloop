@@ -13,41 +13,12 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Storage interface for loose coupling
-type Storage interface {
-	// Wallet tracking
-	AddWatchedWallet(ctx context.Context, network types.BlockchainType, address, walletID string) error
-	RemoveWatchedWallet(ctx context.Context, network types.BlockchainType, address string) error
-	IsWatchedWallet(ctx context.Context, network types.BlockchainType, address string) (string, bool, error)
-	GetWatchedWallets(ctx context.Context, network types.BlockchainType) (map[string]string, error)
-
-	// Block processing
-	SetLastProcessedBlock(ctx context.Context, network types.BlockchainType, blockNumber uint64) error
-	GetLastProcessedBlock(ctx context.Context, network types.BlockchainType) (uint64, error)
-	IsBlockProcessed(ctx context.Context, network types.BlockchainType, blockNumber uint64) (bool, error)
-	MarkBlockProcessed(ctx context.Context, network types.BlockchainType, blockNumber uint64) error
-	// AdvanceHighWaterMark tries to advance lastProcessed forward while contiguous bits are set
-	AdvanceHighWaterMark(ctx context.Context, network types.BlockchainType) error
-
-	// Transaction processing progress
-	AddProcessedTransaction(ctx context.Context, network types.BlockchainType, blockNumber uint64, txHash string) error
-	GetProcessedTransactions(ctx context.Context, network types.BlockchainType, blockNumber uint64) ([]string, error)
-	ClearBlockProgress(ctx context.Context, network types.BlockchainType, blockNumber uint64) error
-
-	// Caching
-	SetCache(ctx context.Context, key string, value interface{}, ttl time.Duration) error
-	GetCache(ctx context.Context, key string, dest interface{}) error
-	DeleteCache(ctx context.Context, key string) error
-
-	// Health check
-	Ping(ctx context.Context) error
-	Close() error
-}
-
 // RedisStorage implements Storage interface using Redis
 type RedisStorage struct {
 	client *redis.Client
 	logger *logrus.Logger
+
+	bloom *WalletBloom
 }
 
 // NewRedisStorage creates a new Redis storage instance
@@ -73,16 +44,30 @@ func NewRedisStorage(cfg *config.RedisConfig, logger *logrus.Logger) (*RedisStor
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
 
-	return &RedisStorage{
+	rs := &RedisStorage{
 		client: client,
 		logger: logger,
-	}, nil
+		bloom:  NewWalletBloom(logger),
+	}
+
+	// Seed bloom filters from current Redis state (best-effort)
+	networks := []types.BlockchainType{types.Ethereum, types.BSC, types.Bitcoin}
+	if err := rs.bloom.SeedAll(ctx, networks, rs.GetWatchedWallets); err != nil {
+		logger.Warnf("Failed to initialize Bloom filters: %v", err)
+	}
+
+	return rs, nil
 }
 
 // Wallet tracking methods
 func (r *RedisStorage) AddWatchedWallet(ctx context.Context, network types.BlockchainType, address, walletID string) error {
 	key := fmt.Sprintf("watch:wallets:%s", network)
-	return r.client.HSet(ctx, key, address, walletID).Err()
+	if err := r.client.HSet(ctx, key, address, walletID).Err(); err != nil {
+		return err
+	}
+	// Update Bloom filter (best-effort)
+	r.bloom.Add(network, address)
+	return nil
 }
 
 func (r *RedisStorage) RemoveWatchedWallet(ctx context.Context, network types.BlockchainType, address string) error {
@@ -92,6 +77,12 @@ func (r *RedisStorage) RemoveWatchedWallet(ctx context.Context, network types.Bl
 
 func (r *RedisStorage) IsWatchedWallet(ctx context.Context, network types.BlockchainType, address string) (string, bool, error) {
 	key := fmt.Sprintf("watch:wallets:%s", network)
+
+	// Fast negative path via Bloom pre-check
+	if r.bloom != nil && !r.bloom.MaybeContains(network, address) {
+		return "", false, nil
+	}
+
 	walletID, err := r.client.HGet(ctx, key, address).Result()
 	if err == redis.Nil {
 		return "", false, nil
@@ -109,7 +100,6 @@ func (r *RedisStorage) GetWatchedWallets(ctx context.Context, network types.Bloc
 
 // Block processing methods
 func (r *RedisStorage) SetLastProcessedBlock(ctx context.Context, network types.BlockchainType, blockNumber uint64) error {
-	// Monotonic update without Lua (best effort): only set if new >= existing
 	key := "last_processed_blocks"
 	field := string(network)
 
@@ -141,7 +131,6 @@ func (r *RedisStorage) GetLastProcessedBlock(ctx context.Context, network types.
 }
 
 func (r *RedisStorage) IsBlockProcessed(ctx context.Context, network types.BlockchainType, blockNumber uint64) (bool, error) {
-	// Use a time-based window approach instead of a broken bitmap
 	windowSize := uint64(100000) // 100k blocks per window
 	windowKey := fmt.Sprintf("processed_blocks:%s:%d", network, blockNumber/windowSize)
 	bitPos := int64(blockNumber % windowSize)
@@ -150,7 +139,6 @@ func (r *RedisStorage) IsBlockProcessed(ctx context.Context, network types.Block
 }
 
 func (r *RedisStorage) MarkBlockProcessed(ctx context.Context, network types.BlockchainType, blockNumber uint64) error {
-	// Use a time-based window approach instead of a broken bitmap
 	windowSize := uint64(100000) // 100k blocks per window
 	windowKey := fmt.Sprintf("processed_blocks:%s:%d", network, blockNumber/windowSize)
 	bitPos := int64(blockNumber % windowSize)
@@ -161,12 +149,10 @@ func (r *RedisStorage) MarkBlockProcessed(ctx context.Context, network types.Blo
 		return err
 	}
 
-	// Set expiration on the window key (30 days)
 	if err := r.client.Expire(ctx, windowKey, 30*24*time.Hour).Err(); err != nil {
 		return err
 	}
 
-	// HWM advancement handled in tracker (needs confirmations/current height context)
 	return nil
 }
 
@@ -206,7 +192,6 @@ func (r *RedisStorage) AdvanceHighWaterMark(ctx context.Context, network types.B
 	return nil
 }
 
-// Transaction processing progress methods
 func (r *RedisStorage) AddProcessedTransaction(ctx context.Context, network types.BlockchainType, blockNumber uint64, txHash string) error {
 	key := fmt.Sprintf("%s:block_progress:%d", network, blockNumber)
 	return r.client.SAdd(ctx, key, txHash).Err()
@@ -222,7 +207,6 @@ func (r *RedisStorage) ClearBlockProgress(ctx context.Context, network types.Blo
 	return r.client.Del(ctx, key).Err()
 }
 
-// Caching methods
 func (r *RedisStorage) SetCache(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -253,164 +237,4 @@ func (r *RedisStorage) Ping(ctx context.Context) error {
 
 func (r *RedisStorage) Close() error {
 	return r.client.Close()
-}
-
-// InMemoryStorage is a simple in-memory implementation for testing
-type InMemoryStorage struct {
-	watchedWallets      map[string]map[string]string   // network -> address -> walletID
-	lastProcessedBlocks map[string]uint64              // network -> blockNumber
-	processedBlocks     map[string]map[uint64]bool     // network -> blockNumber -> processed
-	blockProgress       map[string]map[uint64][]string // network -> blockNumber -> txHashes
-	cache               map[string]interface{}
-}
-
-func NewInMemoryStorage() *InMemoryStorage {
-	return &InMemoryStorage{
-		watchedWallets:      make(map[string]map[string]string),
-		lastProcessedBlocks: make(map[string]uint64),
-		processedBlocks:     make(map[string]map[uint64]bool),
-		blockProgress:       make(map[string]map[uint64][]string),
-		cache:               make(map[string]interface{}),
-	}
-}
-
-// Implement all Storage interface methods for InMemoryStorage
-// (Implementation omitted for brevity, but would follow similar patterns)
-
-func (m *InMemoryStorage) AddWatchedWallet(ctx context.Context, network types.BlockchainType, address, walletID string) error {
-	if m.watchedWallets[string(network)] == nil {
-		m.watchedWallets[string(network)] = make(map[string]string)
-	}
-	m.watchedWallets[string(network)][address] = walletID
-	return nil
-}
-
-func (m *InMemoryStorage) IsWatchedWallet(ctx context.Context, network types.BlockchainType, address string) (string, bool, error) {
-	if wallets, exists := m.watchedWallets[string(network)]; exists {
-		if walletID, found := wallets[address]; found {
-			return walletID, true, nil
-		}
-	}
-	return "", false, nil
-}
-
-func (m *InMemoryStorage) Ping(ctx context.Context) error {
-	return nil
-}
-
-func (m *InMemoryStorage) Close() error {
-	return nil
-}
-
-// Add other required methods...
-func (m *InMemoryStorage) RemoveWatchedWallet(ctx context.Context, network types.BlockchainType, address string) error {
-	if wallets, exists := m.watchedWallets[string(network)]; exists {
-		delete(wallets, address)
-	}
-	return nil
-}
-
-func (m *InMemoryStorage) GetWatchedWallets(ctx context.Context, network types.BlockchainType) (map[string]string, error) {
-	if wallets, exists := m.watchedWallets[string(network)]; exists {
-		return wallets, nil
-	}
-	return make(map[string]string), nil
-}
-
-func (m *InMemoryStorage) SetLastProcessedBlock(ctx context.Context, network types.BlockchainType, blockNumber uint64) error {
-	// Monotonic: only move forward
-	n := string(network)
-	if cur, ok := m.lastProcessedBlocks[n]; ok {
-		if blockNumber >= cur {
-			m.lastProcessedBlocks[n] = blockNumber
-		}
-		return nil
-	}
-	m.lastProcessedBlocks[n] = blockNumber
-	return nil
-}
-
-func (m *InMemoryStorage) GetLastProcessedBlock(ctx context.Context, network types.BlockchainType) (uint64, error) {
-	if block, exists := m.lastProcessedBlocks[string(network)]; exists {
-		return block, nil
-	}
-	return 0, nil
-}
-
-func (m *InMemoryStorage) IsBlockProcessed(ctx context.Context, network types.BlockchainType, blockNumber uint64) (bool, error) {
-	if blocks, exists := m.processedBlocks[string(network)]; exists {
-		return blocks[blockNumber], nil
-	}
-	return false, nil
-}
-
-func (m *InMemoryStorage) MarkBlockProcessed(ctx context.Context, network types.BlockchainType, blockNumber uint64) error {
-	if m.processedBlocks[string(network)] == nil {
-		m.processedBlocks[string(network)] = make(map[uint64]bool)
-	}
-	m.processedBlocks[string(network)][blockNumber] = true
-	return m.AdvanceHighWaterMark(ctx, network)
-}
-
-func (m *InMemoryStorage) AdvanceHighWaterMark(ctx context.Context, network types.BlockchainType) error {
-	n := string(network)
-	last := m.lastProcessedBlocks[n]
-	advanced := last
-	for {
-		next := advanced + 1
-		if done := m.processedBlocks[n][next]; !done {
-			break
-		}
-		advanced = next
-		if advanced-last > 10000 {
-			break
-		}
-	}
-	if advanced > last {
-		m.lastProcessedBlocks[n] = advanced
-	}
-	return nil
-}
-
-func (m *InMemoryStorage) AddProcessedTransaction(ctx context.Context, network types.BlockchainType, blockNumber uint64, txHash string) error {
-	if m.blockProgress[string(network)] == nil {
-		m.blockProgress[string(network)] = make(map[uint64][]string)
-	}
-	m.blockProgress[string(network)][blockNumber] = append(m.blockProgress[string(network)][blockNumber], txHash)
-	return nil
-}
-
-func (m *InMemoryStorage) GetProcessedTransactions(ctx context.Context, network types.BlockchainType, blockNumber uint64) ([]string, error) {
-	if progress, exists := m.blockProgress[string(network)]; exists {
-		if txs, found := progress[blockNumber]; found {
-			return txs, nil
-		}
-	}
-	return []string{}, nil
-}
-
-func (m *InMemoryStorage) ClearBlockProgress(ctx context.Context, network types.BlockchainType, blockNumber uint64) error {
-	if progress, exists := m.blockProgress[string(network)]; exists {
-		delete(progress, blockNumber)
-	}
-	return nil
-}
-
-func (m *InMemoryStorage) SetCache(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
-	m.cache[key] = value
-	return nil
-}
-
-func (m *InMemoryStorage) GetCache(ctx context.Context, key string, dest interface{}) error {
-	if value, exists := m.cache[key]; exists {
-		// Simple assignment - in real implementation, would need proper type handling
-		*dest.(*interface{}) = value
-		return nil
-	}
-	return fmt.Errorf("cache key not found: %s", key)
-}
-
-func (m *InMemoryStorage) DeleteCache(ctx context.Context, key string) error {
-	delete(m.cache, key)
-	return nil
 }

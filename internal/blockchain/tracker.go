@@ -67,7 +67,7 @@ func (tm *TrackerManager) StartTracker(ctx context.Context, network types.Blockc
 
 	var tracker Tracker
 
-	buildBaseCfg := func(confirmations, batchSize, maxConcurrentBlocks int) base.BaseTrackerConfig {
+	buildBaseCfg := func(confirmations, batchSize, maxConcurrentBlocks int, requeueDelay time.Duration) base.BaseTrackerConfig {
 		return base.BaseTrackerConfig{
 			Confirmations:       confirmations,
 			BatchSize:           batchSize,
@@ -75,6 +75,7 @@ func (tm *TrackerManager) StartTracker(ctx context.Context, network types.Blockc
 			PollInterval:        15 * time.Second,
 			CatchupBatchSize:    50,
 			HealthCheckInterval: 30 * time.Second,
+			RequeueDelay:        requeueDelay,
 		}
 	}
 
@@ -95,7 +96,7 @@ func (tm *TrackerManager) StartTracker(ctx context.Context, network types.Blockc
 			return fmt.Errorf("failed to create %s processor: %w", network, perr)
 		}
 
-		baseCfg := buildBaseCfg(cfg.Confirmations, cfg.BatchSize, cfg.MaxConcurrentBlocks)
+		baseCfg := buildBaseCfg(cfg.Confirmations, cfg.BatchSize, cfg.MaxConcurrentBlocks, 5*time.Second)
 		bt := base.NewBaseTracker(proc, tm.storage, tm.publisher, tm.logger, baseCfg)
 		proc.SetBaseTracker(bt)
 		tracker = bt
@@ -105,7 +106,7 @@ func (tm *TrackerManager) StartTracker(ctx context.Context, network types.Blockc
 		if perr != nil {
 			return fmt.Errorf("failed to create Bitcoin processor: %w", perr)
 		}
-		bcfg := buildBaseCfg(tm.cfg.Bitcoin.Confirmations, tm.cfg.Bitcoin.BatchSize, tm.cfg.Bitcoin.MaxConcurrentBlocks)
+		bcfg := buildBaseCfg(tm.cfg.Bitcoin.Confirmations, tm.cfg.Bitcoin.BatchSize, tm.cfg.Bitcoin.MaxConcurrentBlocks, tm.cfg.Bitcoin.RequeueDelay)
 		bbt := base.NewBaseTracker(bproc, tm.storage, tm.publisher, tm.logger, bcfg)
 		bproc.SetBaseTracker(bbt)
 		tracker = bbt

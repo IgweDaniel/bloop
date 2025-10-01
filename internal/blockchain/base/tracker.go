@@ -45,6 +45,7 @@ type BaseTrackerConfig struct {
 	PollInterval        time.Duration `json:"poll_interval"`
 	CatchupBatchSize    int           `json:"catchup_batch_size"`
 	HealthCheckInterval time.Duration `json:"health_check_interval"`
+	RequeueDelay        time.Duration `json:"requeue_delay"`
 }
 
 // BaseTracker provides common functionality for all blockchain trackers
@@ -424,8 +425,11 @@ func (bt *BaseTracker) processBlockSafely(ctx context.Context, blockNumber uint6
 
 	confirmations := currentBlock - blockNumber
 	if confirmations < uint64(bt.config.Confirmations) {
-		// Not enough confirmations, requeue for later
-		time.AfterFunc(30*time.Second, func() {
+		delay := bt.config.RequeueDelay
+		if delay <= 0 {
+			delay = 5 * time.Second
+		}
+		time.AfterFunc(delay, func() {
 			select {
 			case bt.blockCh <- blockNumber:
 			default:
@@ -455,20 +459,11 @@ func (bt *BaseTracker) processBlockSafely(ctx context.Context, blockNumber uint6
 		// Best-effort: drop cached block now that we're done (avoid cache growth)
 		_ = bt.storage.DeleteCache(ctx, fmt.Sprintf("%s:block:%d", network, blockNumber))
 
-		// Advance HWM only when next contiguous blocks are past confirmations
-		// Compute current height once for this advancement step
-		cur, err := bt.processor.GetCurrentBlockHeight(ctx)
-		if err != nil {
-			bt.logger.Errorf("Failed to get current block height for HWM advance: %v", err)
-		} else {
-			// Only consider advancing if HWM+1 is <= cur-confirmations
-			next := blockNumber + 1
-			safeMax := cur - uint64(bt.config.Confirmations)
-			if next <= safeMax {
-				// Walk forward from existing HWM using bitmap knowledge
-				if err := bt.storage.AdvanceHighWaterMark(ctx, network); err != nil {
-					bt.logger.Errorf("Failed to advance high-water mark: %v", err)
-				}
+		next := blockNumber + 1
+		safeMax := currentBlock - uint64(bt.config.Confirmations)
+		if next <= safeMax {
+			if err := bt.storage.AdvanceHighWaterMark(ctx, network); err != nil {
+				bt.logger.Errorf("Failed to advance high-water mark: %v", err)
 			}
 		}
 

@@ -68,6 +68,10 @@ type BitcoinConfig struct {
 	RPCTimeout          time.Duration `mapstructure:"rpc_timeout"`
 	RetryAttempts       int           `mapstructure:"retry_attempts"`
 	RetryDelay          time.Duration `mapstructure:"retry_delay"`
+	TxFetchConcurrency  int           `mapstructure:"tx_fetch_concurrency"`
+	RequeueDelay        time.Duration `mapstructure:"requeue_delay"`
+	RequestsPerSecond   int           `mapstructure:"requests_per_second"`
+	RequestsBurst       int           `mapstructure:"requests_burst"`
 	IsActive            bool          `mapstructure:"is_active"`
 }
 type MonitoringConfig struct {
@@ -139,6 +143,10 @@ func setDefaults() {
 	viper.SetDefault("bitcoin.rpc_timeout", "30s")
 	viper.SetDefault("bitcoin.retry_attempts", 3)
 	viper.SetDefault("bitcoin.retry_delay", "2s")
+	viper.SetDefault("bitcoin.tx_fetch_concurrency", 20)
+	viper.SetDefault("bitcoin.requeue_delay", "5s")
+	viper.SetDefault("bitcoin.requests_per_second", 3)
+	viper.SetDefault("bitcoin.requests_burst", 5)
 	viper.SetDefault("bitcoin.ws_url", "")
 	viper.SetDefault("bitcoin.api_url", "")
 

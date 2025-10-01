@@ -3,6 +3,7 @@ module github.com/igwedaniel/bloop
 go 1.24.0
 
 require (
+	github.com/bits-and-blooms/bloom/v3 v3.7.0
 	github.com/ethereum/go-ethereum v1.16.3
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/gorilla/websocket v1.5.1

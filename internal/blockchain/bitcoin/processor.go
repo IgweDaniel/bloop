@@ -25,6 +25,8 @@ type BitcoinProcessor struct {
 	baseTracker *base.BaseTracker
 	rpc         Client
 	wsURL       string
+
+	tipTTL time.Duration
 }
 
 func NewBitcoinProcessor(
@@ -36,6 +38,7 @@ func NewBitcoinProcessor(
 		storage: storage,
 		config:  cfg,
 		logger:  logger,
+		tipTTL:  2 * time.Second,
 	}, nil
 }
 
@@ -58,8 +61,26 @@ func (bp *BitcoinProcessor) InitializeProviders(ctx context.Context) error {
 
 func (bp *BitcoinProcessor) CleanupProviders() error { return nil }
 
+// Caching is appropriate for Bitcoin because new blocks are produced at a relatively slow and predictable rate (approximately every 10 minutes).
+// This allows us to safely cache the current block height for a short period without risking significant staleness or missing new blocks.
 func (bp *BitcoinProcessor) GetCurrentBlockHeight(ctx context.Context) (uint64, error) {
-	return bp.rpc.GetBlockCount(ctx)
+	var cached struct {
+		Height uint64 `json:"height"`
+	}
+	cacheKey := fmt.Sprintf("%s:tip", bp.GetNetwork())
+	if err := bp.storage.GetCache(ctx, cacheKey, &cached); err == nil && cached.Height > 0 {
+		return cached.Height, nil
+	}
+
+	// Miss: fetch and set short TTL
+	h, err := bp.rpc.GetBlockCount(ctx)
+	if err != nil {
+		return 0, err
+	}
+	_ = bp.storage.SetCache(ctx, cacheKey, struct {
+		Height uint64 `json:"height"`
+	}{Height: h}, bp.tipTTL)
+	return h, nil
 }
 
 func (bp *BitcoinProcessor) SubscribeToNewBlocks(ctx context.Context, blockCh chan<- uint64) error {
@@ -72,22 +93,12 @@ func (bp *BitcoinProcessor) SubscribeToNewBlocks(ctx context.Context, blockCh ch
 		return fmt.Errorf("invalid ws_url: %w", err)
 	}
 
+	// Reconnect loop: first retry is immediate; subsequent retries back off exponentially up to a cap.
+	// This function only returns when the context is canceled.
 	dialer := websocket.Dialer{}
-	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
-	if err != nil {
-		return fmt.Errorf("ws dial failed: %w", err)
-	}
-
-	// request block notifications (per TS: {action:"want", data:["blocks"]})
-	_ = conn.WriteJSON(map[string]interface{}{"action": "want", "data": []string{"blocks"}})
-
-	pingTicker := time.NewTicker(30 * time.Second)
-	defer pingTicker.Stop()
-
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
+	baseBackoff := 250 * time.Millisecond
+	maxBackoff := 15 * time.Second
+	attempt := 0
 
 	type wsBlockMsg struct {
 		Block struct {
@@ -96,41 +107,117 @@ func (bp *BitcoinProcessor) SubscribeToNewBlocks(ctx context.Context, blockCh ch
 	}
 
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return nil
-		default:
 		}
 
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
-				return nil
+		// Backoff before dialing only after the first failed attempt; the first retry is immediate.
+		if attempt > 0 {
+			delay := baseBackoff << (attempt - 1)
+			if delay > maxBackoff {
+				delay = maxBackoff
 			}
-			if websocket.IsCloseError(err) {
-				return nil
-			}
-			return fmt.Errorf("ws read failed: %w", err)
-		}
-		var evt wsBlockMsg
-		if err := json.Unmarshal(message, &evt); err == nil && evt.Block.Height > 0 {
+			timer := time.NewTimer(delay)
 			select {
-			case blockCh <- evt.Block.Height:
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return nil
+			case <-timer.C:
+			}
+		}
+
+		conn, _, err := dialer.DialContext(ctx, u.String(), nil)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			bp.logger.Warnf("BTC websocket dial failed (attempt %d): %v", attempt+1, err)
+			attempt++
+			continue
+		}
+
+		// Reset attempts on successful connection
+		attempt = 0
+
+		// request block notifications (per TS: {action:"want", data:["blocks"]})
+		msg := map[string]interface{}{
+			"action": "want",
+			"data":   []string{"blocks"},
+		}
+
+		bp.logger.WithField("msg", msg).Info("Sending message to websocket")
+		_ = conn.WriteJSON(msg)
+
+		pingTicker := time.NewTicker(30 * time.Second)
+		// Ensure ticker stopped when we exit this connection scope
+		connClosed := make(chan struct{})
+		go func() {
+			<-ctx.Done()
+			_ = conn.Close()
+			close(connClosed)
+		}()
+
+		// Read loop for a single connection
+	readLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				_ = conn.Close()
+				pingTicker.Stop()
+				return nil
+			default:
+			}
+
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				// Treat all read/close errors as triggers to reconnect unless context is canceled
+				if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) || websocket.IsCloseError(err) {
+					_ = conn.Close()
+					pingTicker.Stop()
+					if ctx.Err() != nil {
+						return nil
+					}
+					bp.logger.Warnf("BTC websocket disconnected: %v (reconnecting)", err)
+					break readLoop
+				}
+				_ = conn.Close()
+				pingTicker.Stop()
+				if ctx.Err() != nil {
+					return nil
+				}
+				bp.logger.Warnf("BTC websocket read error: %v (reconnecting)", err)
+				break readLoop
+			}
+			var evt wsBlockMsg
+			if err := json.Unmarshal(message, &evt); err == nil && evt.Block.Height > 0 {
+				select {
+				case blockCh <- evt.Block.Height:
+					bp.logger.WithField("block_height", evt.Block.Height).Info("New block height received")
+				default:
+				}
+			}
+
+			select {
+			case <-pingTicker.C:
+				if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second)); err != nil {
+					_ = conn.Close()
+					pingTicker.Stop()
+					bp.logger.Warnf("BTC websocket ping failed: %v (reconnecting)", err)
+					break readLoop
+				}
 			default:
 			}
 		}
 
-		select {
-		case <-pingTicker.C:
-			if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second)); err != nil {
-				return fmt.Errorf("ws ping failed: %w", err)
-			}
-		default:
-		}
+		// Increment attempt count so that if we immediately fail again, we will start backing off
+		attempt++
 	}
 }
 
 func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64) (bool, error) {
+	bp.logger.WithField("block_number", blockNumber).Info("Processing block")
 	hash, err := bp.rpc.GetBlockHash(ctx, blockNumber)
 	if err != nil {
 		return false, err
@@ -165,7 +252,7 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 					Network:       types.Bitcoin,
 					BlockNumber:   blockNumber,
 					Confirmations: 1,
-					Timestamp:     time.Unix(block.Time, 0),
+					Timestamp:     time.Unix(block.Time, 0).UTC(),
 					NetworkFee:    "",
 					Status:        types.StatusConfirmed,
 				}
