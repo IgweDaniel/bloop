@@ -2,7 +2,6 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: ["main"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -40,7 +39,7 @@ jobs:
         with:
           images: ${{ steps.vars.outputs.image }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha,format=long
             type=semver,pattern={{version}},prefix=v,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{major}}.{{minor}},prefix=v,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
