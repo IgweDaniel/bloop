@@ -14,6 +14,8 @@ type Storage interface {
 	GetWatchedWallets(ctx context.Context, network types.BlockchainType) (map[string]string, error)
 
 	SetLastProcessedBlock(ctx context.Context, network types.BlockchainType, blockNumber uint64) error
+	// ForceSetLastProcessedBlock sets the last processed block even if it moves backwards.
+	ForceSetLastProcessedBlock(ctx context.Context, network types.BlockchainType, blockNumber uint64) error
 	GetLastProcessedBlock(ctx context.Context, network types.BlockchainType) (uint64, error)
 	IsBlockProcessed(ctx context.Context, network types.BlockchainType, blockNumber uint64) (bool, error)
 	MarkBlockProcessed(ctx context.Context, network types.BlockchainType, blockNumber uint64) error

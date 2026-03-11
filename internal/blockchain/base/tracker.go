@@ -90,9 +90,9 @@ func NewBaseTracker(
 		logger:         logger,
 		config:         config,
 		blockSemaphore: semaphore.NewWeighted(int64(config.MaxConcurrentBlocks)),
-		rpcSemaphore:   semaphore.NewWeighted(50), // Default RPC concurrency limit
+		rpcSemaphore:   semaphore.NewWeighted(20), // Reduced from 50 for lower memory usage
 		stopCh:         make(chan struct{}),
-		blockCh:        make(chan uint64, 100),
+		blockCh:        make(chan uint64, 20),     // Reduced from 100 for lower memory usage
 		startTime:      time.Now(),
 	}
 }
@@ -269,6 +269,38 @@ func (bt *BaseTracker) healthMonitorLoop(ctx context.Context) {
 	}
 }
 
+// normalizeLastProcessed clamps lastProcessed when it is ahead of currentBlock.
+// This can happen if storage was seeded from a different network or a corrupted value.
+func (bt *BaseTracker) normalizeLastProcessed(ctx context.Context, currentBlock uint64) uint64 {
+	network := bt.processor.GetNetwork()
+	lastProcessed, err := bt.storage.GetLastProcessedBlock(ctx, network)
+	if err != nil {
+		bt.logger.Errorf("Failed to get last processed block: %v", err)
+		return 0
+	}
+
+	if lastProcessed > currentBlock {
+		resetTo := currentBlock
+		if currentBlock > uint64(bt.config.Confirmations) {
+			resetTo = currentBlock - uint64(bt.config.Confirmations)
+		}
+		bt.logger.WithFields(logrus.Fields{
+			"network":        network,
+			"last_processed": lastProcessed,
+			"current_block":  currentBlock,
+			"reset_to":       resetTo,
+		}).Warn("Last processed is ahead of current; resetting")
+
+		if err := bt.storage.ForceSetLastProcessedBlock(ctx, network, resetTo); err != nil {
+			bt.logger.Errorf("Failed to reset last processed block: %v", err)
+			return lastProcessed
+		}
+		return resetTo
+	}
+
+	return lastProcessed
+}
+
 // performInitialCatchup processes missed blocks since last run
 func (bt *BaseTracker) performInitialCatchup(ctx context.Context) {
 	network := bt.processor.GetNetwork()
@@ -279,11 +311,7 @@ func (bt *BaseTracker) performInitialCatchup(ctx context.Context) {
 		return
 	}
 
-	lastProcessed, err := bt.storage.GetLastProcessedBlock(ctx, network)
-	if err != nil {
-		bt.logger.Errorf("Failed to get last processed block for %s catchup: %v", network, err)
-		return
-	}
+	lastProcessed := bt.normalizeLastProcessed(ctx, currentBlock)
 
 	if lastProcessed == 0 {
 		// First run: set HWM to the current block and persist it
@@ -350,10 +378,8 @@ func (bt *BaseTracker) performPolling(ctx context.Context) {
 		return
 	}
 
-	lastProcessed, err := bt.storage.GetLastProcessedBlock(ctx, bt.processor.GetNetwork())
-	if err != nil {
-		bt.logger.Errorf("Failed to get last processed block: %v", err)
-		bt.errorCount++
+	lastProcessed := bt.normalizeLastProcessed(ctx, currentBlock)
+	if lastProcessed == 0 && currentBlock == 0 {
 		return
 	}
 
@@ -514,6 +540,24 @@ func (bt *BaseTracker) PublishDeposit(ctx context.Context, deposit *types.Wallet
 		"currency":     deposit.Currency,
 		"block_number": deposit.BlockNumber,
 	}).Info("Deposit detected and published")
+
+	return nil
+}
+
+// PublishWithdrawal publishes a withdrawal event
+func (bt *BaseTracker) PublishWithdrawal(ctx context.Context, withdrawal *types.WalletWithdrawal) error {
+	if err := bt.publisher.PublishWithdrawal(ctx, withdrawal); err != nil {
+		return fmt.Errorf("failed to publish withdrawal: %w", err)
+	}
+
+	bt.logger.WithFields(logrus.Fields{
+		"network":      withdrawal.Network,
+		"tx_hash":      withdrawal.TxHash,
+		"wallet_id":    withdrawal.WalletID,
+		"amount":       withdrawal.Amount,
+		"currency":     withdrawal.Currency,
+		"block_number": withdrawal.BlockNumber,
+	}).Info("Withdrawal detected and published")
 
 	return nil
 }

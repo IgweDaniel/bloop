@@ -20,6 +20,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/time/rate"
 )
 
 // USDT ABI
@@ -30,15 +31,18 @@ var (
 )
 
 type EthereumProcessor struct {
-	client       *EthereumClient
-	wsClient     *ethclient.Client
-	ominiClient  *ethclient.Client // Dedicated client for block fetching (like TypeScript ominiProvider)
-	storage      storage.Storage
-	config       *config.EthereumConfig
-	logger       *logrus.Logger
-	usdtContract common.Address
-	usdtABI      abi.ABI
-	baseTracker  *base.BaseTracker
+	client        *EthereumClient
+	wsClient      *ethclient.Client
+	ominiClients  []*ethclient.Client // Multiple dedicated clients for block fetching with rotation
+	ominiLimiters []*rate.Limiter     // Rate limiters for each omini client
+	ominiIndex    int                 // Current index for round-robin rotation
+	ominiMu       sync.RWMutex        // Mutex for omini client rotation
+	storage       storage.Storage
+	config        *config.EthereumConfig
+	logger        *logrus.Logger
+	usdtContract  common.Address
+	usdtABI       abi.ABI
+	baseTracker   *base.BaseTracker
 
 	network      bloopTypes.BlockchainType
 	rpcSemaphore *semaphore.Weighted
@@ -62,7 +66,7 @@ func NewEthereumProcessor(
 		usdtContract: common.HexToAddress(cfg.USDTContract),
 		usdtABI:      usdtAbi,
 		network:      network,
-		rpcSemaphore: semaphore.NewWeighted(50),
+		rpcSemaphore: semaphore.NewWeighted(20), // Reduced from 50 for lower memory usage
 	}
 
 	return processor, nil
@@ -85,15 +89,50 @@ func (ep *EthereumProcessor) InitializeProviders(ctx context.Context) error {
 
 	ep.client = client
 
-	ep.logger.Info("omini RPC URL: ", ep.config.OminiRPCURL)
-	// Initialize dedicated omini client for block fetching
-	if ep.config.OminiRPCURL != "" {
-		ominiClient, err := ethclient.Dial(ep.config.OminiRPCURL)
-		if err != nil {
-			ep.logger.Warnf("Failed to create omini client, using regular client: %v", err)
+	// Build list of omini URLs (support both old and new config format)
+	var ominiURLs []string
+	if len(ep.config.OminiRPCURLs) > 0 {
+		ominiURLs = ep.config.OminiRPCURLs
+	} else if ep.config.OminiRPCURL != "" {
+		// Backwards compatibility with single URL
+		ominiURLs = []string{ep.config.OminiRPCURL}
+	}
+
+	// Initialize multiple dedicated omini clients for block fetching with rotation
+	if len(ominiURLs) > 0 {
+		// Get rate limit config
+		rps := ep.config.OminiRequestsPerSecond
+		if rps <= 0 {
+			rps = 5 // Default to 5 RPS
+		}
+		burst := ep.config.OminiRequestsBurst
+		if burst <= 0 {
+			burst = 10 // Default to 10 burst
+		}
+
+		ep.ominiClients = make([]*ethclient.Client, 0, len(ominiURLs))
+		ep.ominiLimiters = make([]*rate.Limiter, 0, len(ominiURLs))
+
+		for i, url := range ominiURLs {
+			ominiClient, err := ethclient.Dial(url)
+			if err != nil {
+				ep.logger.Warnf("Failed to create omini client #%d (%s): %v", i+1, url, err)
+				continue
+			}
+
+			// Create a dedicated rate limiter for this omini client
+			limiter := rate.NewLimiter(rate.Limit(rps), burst)
+
+			ep.ominiClients = append(ep.ominiClients, ominiClient)
+			ep.ominiLimiters = append(ep.ominiLimiters, limiter)
+			ep.logger.Infof("Omini RPC client #%d initialized with %d RPS (burst: %d): %s",
+				len(ep.ominiClients), rps, burst, url)
+		}
+
+		if len(ep.ominiClients) == 0 {
+			ep.logger.Warn("No omini clients available, will use regular client for block fetching")
 		} else {
-			ep.ominiClient = ominiClient
-			ep.logger.Info("Omini RPC client initialized for block fetching")
+			ep.logger.Infof("Initialized %d omini RPC clients with rotation and rate limiting", len(ep.ominiClients))
 		}
 	}
 
@@ -106,8 +145,11 @@ func (ep *EthereumProcessor) CleanupProviders() error {
 	if ep.wsClient != nil {
 		ep.wsClient.Close()
 	}
-	if ep.ominiClient != nil {
-		ep.ominiClient.Close()
+	// Close all omini clients
+	for _, ominiClient := range ep.ominiClients {
+		if ominiClient != nil {
+			ominiClient.Close()
+		}
 	}
 	if ep.client != nil {
 		ep.client.Close()
@@ -117,6 +159,22 @@ func (ep *EthereumProcessor) CleanupProviders() error {
 
 func (ep *EthereumProcessor) GetCurrentBlockHeight(ctx context.Context) (uint64, error) {
 	return ep.client.BlockNumber(ctx)
+}
+
+// getNextOminiClient returns the next omini client and its rate limiter using round-robin rotation
+func (ep *EthereumProcessor) getNextOminiClient() (*ethclient.Client, *rate.Limiter) {
+	if len(ep.ominiClients) == 0 {
+		return nil, nil
+	}
+
+	ep.ominiMu.Lock()
+	defer ep.ominiMu.Unlock()
+
+	client := ep.ominiClients[ep.ominiIndex]
+	limiter := ep.ominiLimiters[ep.ominiIndex]
+	ep.ominiIndex = (ep.ominiIndex + 1) % len(ep.ominiClients)
+
+	return client, limiter
 }
 
 func (ep *EthereumProcessor) SubscribeToNewBlocks(ctx context.Context, blockCh chan<- uint64) error {
@@ -130,7 +188,7 @@ func (ep *EthereumProcessor) SubscribeToNewBlocks(ctx context.Context, blockCh c
 	}
 
 	ep.wsClient = wsClient
-	headers := make(chan *types.Header, 100)
+	headers := make(chan *types.Header, 10) // Reduced from 100 for lower memory usage
 
 	sub, err := wsClient.SubscribeNewHead(ctx, headers)
 	if err != nil {
@@ -278,42 +336,13 @@ func (ep *EthereumProcessor) processBatch(ctx context.Context, batch types.Trans
 }
 
 func (ep *EthereumProcessor) processTransaction(ctx context.Context, tx *types.Transaction, blockNumber uint64) error {
-	// Optionally skip native processing (useful for BSC where we focus on tokens)
-	if !ep.config.SkipNative {
-		if err := ep.processETHTransaction(ctx, tx, blockNumber); err != nil {
-			ep.logger.Errorf("Failed to process native transaction %s: %v", tx.Hash().Hex(), err)
-		}
-	}
-
-	if err := ep.processUSDTTransaction(ctx, tx, blockNumber); err != nil {
-		ep.logger.Errorf("Failed to process USDT transaction %s: %v", tx.Hash().Hex(), err)
-	}
-
-	return nil
-}
-
-// processETHTransaction processes native ETH transactions
-func (ep *EthereumProcessor) processETHTransaction(ctx context.Context, tx *types.Transaction, blockNumber uint64) error {
-	// Skip if no value or no recipient
-	if tx.Value().Cmp(big.NewInt(0)) == 0 || tx.To() == nil {
-		return nil
-	}
 
 	switch tx.Type() {
 	case types.LegacyTxType, types.AccessListTxType, types.DynamicFeeTxType:
 	case types.BlobTxType:
-		ep.logger.Debugf("Skipping blob transaction %s (EIP-4844)", tx.Hash().Hex())
-		return nil
+		ep.logger.Debugf("Processing blob transaction %s for USDT transfers", tx.Hash().Hex())
 	default:
 		ep.logger.Warnf("Skipping unsupported transaction type %d in tx %s", tx.Type(), tx.Hash().Hex())
-		return nil
-	}
-
-	walletID, isWatched, err := ep.storage.IsWatchedWallet(ctx, ep.network, tx.To().Hex())
-	if err != nil {
-		return fmt.Errorf("failed to check watched wallet: %w", err)
-	}
-	if !isWatched {
 		return nil
 	}
 
@@ -322,7 +351,86 @@ func (ep *EthereumProcessor) processETHTransaction(ctx context.Context, tx *type
 		return fmt.Errorf("failed to get transaction receipt: %w", err)
 	}
 
+	// Skip failed transactions
 	if receipt.Status == 0 {
+		return nil
+	}
+
+	// Optionally skip native processing (useful for BSC where we focus on tokens)
+	if !ep.config.SkipNative {
+		if err := ep.processETHTransaction(ctx, tx, blockNumber, receipt); err != nil {
+			ep.logger.Errorf("Failed to process native transaction %s: %v", tx.Hash().Hex(), err)
+		}
+	}
+
+	if err := ep.processUSDTTransaction(ctx, tx, blockNumber, receipt); err != nil {
+		ep.logger.Errorf("Failed to process USDT transaction %s: %v", tx.Hash().Hex(), err)
+	}
+
+	return nil
+}
+
+// processETHTransaction processes native ETH transactions
+func (ep *EthereumProcessor) processETHTransaction(ctx context.Context, tx *types.Transaction, blockNumber uint64, receipt *types.Receipt) error {
+	// Skip if no value or no recipient
+	if tx.Value().Cmp(big.NewInt(0)) == 0 || tx.To() == nil {
+		return nil
+	}
+
+	fromAddr := ep.getFromAddress(tx)
+	fromWalletID, isFromWatched, err := ep.storage.IsWatchedWallet(ctx, ep.network, fromAddr)
+	if err != nil {
+		return fmt.Errorf("failed to check watched wallet: %w", err)
+	}
+
+	toWalletID, isToWatched, err := ep.storage.IsWatchedWallet(ctx, ep.network, tx.To().Hex())
+	if err != nil {
+		return fmt.Errorf("failed to check watched wallet: %w", err)
+	}
+
+	if isFromWatched && !isToWatched {
+		gasUsed := new(big.Int).SetUint64(receipt.GasUsed)
+		var gasPrice *big.Int
+
+		switch tx.Type() {
+		case types.DynamicFeeTxType, types.BlobTxType:
+			gasPrice = receipt.EffectiveGasPrice
+			if gasPrice == nil {
+				gasPrice = big.NewInt(0)
+			}
+		default:
+			gasPrice = tx.GasPrice()
+			if gasPrice == nil {
+				gasPrice = big.NewInt(0)
+			}
+		}
+
+		networkFee := new(big.Int).Mul(gasUsed, gasPrice)
+
+		withdrawal := &bloopTypes.WalletWithdrawal{
+			TxHash:        tx.Hash().Hex(),
+			WalletID:      fromWalletID,
+			WalletAddress: fromAddr,
+			ToAddress:     tx.To().Hex(),
+			Amount:        formatEther(tx.Value()),
+			Currency:      bloopTypes.ETH,
+			Network:       ep.network,
+			BlockNumber:   blockNumber,
+			Confirmations: 1,
+			Timestamp:     ep.BlockToTimestamp(ctx, blockNumber),
+			NetworkFee:    formatEther(networkFee),
+			Status:        bloopTypes.StatusConfirmed,
+		}
+
+		if ep.baseTracker != nil {
+			if err := ep.baseTracker.PublishWithdrawal(ctx, withdrawal); err != nil {
+				ep.logger.Errorf("Failed to publish ETH withdrawal: %v", err)
+			}
+		}
+	}
+
+	walletID, isWatched := toWalletID, isToWatched
+	if !isWatched {
 		return nil
 	}
 
@@ -347,7 +455,7 @@ func (ep *EthereumProcessor) processETHTransaction(ctx context.Context, tx *type
 
 	networkFee := new(big.Int).Mul(gasUsed, gasPrice)
 
-	// Create deposit event
+	// Create deposit event (RawData omitted to reduce memory footprint)
 	deposit := &bloopTypes.WalletDeposit{
 		TxHash:        tx.Hash().Hex(),
 		WalletID:      walletID,
@@ -361,10 +469,6 @@ func (ep *EthereumProcessor) processETHTransaction(ctx context.Context, tx *type
 		Timestamp:     ep.BlockToTimestamp(ctx, blockNumber),
 		NetworkFee:    formatEther(networkFee),
 		Status:        bloopTypes.StatusConfirmed,
-		RawData: map[string]interface{}{
-			"transaction": tx,
-			"receipt":     receipt,
-		},
 	}
 
 	if ep.baseTracker != nil {
@@ -375,28 +479,9 @@ func (ep *EthereumProcessor) processETHTransaction(ctx context.Context, tx *type
 }
 
 // processUSDTTransaction processes USDT token transactions
-func (ep *EthereumProcessor) processUSDTTransaction(ctx context.Context, tx *types.Transaction, blockNumber uint64) error {
+func (ep *EthereumProcessor) processUSDTTransaction(ctx context.Context, tx *types.Transaction, blockNumber uint64, receipt *types.Receipt) error {
 	// Skip if not USDT contract
 	if tx.To() == nil || tx.To().Hex() != ep.usdtContract.Hex() {
-		return nil
-	}
-
-	switch tx.Type() {
-	case types.LegacyTxType, types.AccessListTxType, types.DynamicFeeTxType:
-	case types.BlobTxType:
-		ep.logger.Debugf("Processing blob transaction %s for USDT transfers", tx.Hash().Hex())
-	default:
-		ep.logger.Warnf("Skipping unsupported transaction type %d in tx %s", tx.Type(), tx.Hash().Hex())
-		return nil
-	}
-
-	receipt, err := ep.client.TransactionReceipt(ctx, tx.Hash())
-	if err != nil {
-		return fmt.Errorf("failed to get transaction receipt: %w", err)
-	}
-
-	// Skip failed transactions
-	if receipt.Status == 0 {
 		return nil
 	}
 
@@ -420,13 +505,15 @@ func (ep *EthereumProcessor) processUSDTTransaction(ctx context.Context, tx *typ
 		from := common.HexToAddress(log.Topics[1].Hex())
 		to := common.HexToAddress(log.Topics[2].Hex())
 
-		// Check if recipient is a watched wallet
-		walletID, isWatched, err := ep.storage.IsWatchedWallet(ctx, ep.network, to.Hex())
+		fromWalletID, isFromWatched, err := ep.storage.IsWatchedWallet(ctx, ep.network, from.Hex())
 		if err != nil {
 			ep.logger.Errorf("Failed to check watched wallet: %v", err)
 			continue
 		}
-		if !isWatched {
+
+		toWalletID, isToWatched, err := ep.storage.IsWatchedWallet(ctx, ep.network, to.Hex())
+		if err != nil {
+			ep.logger.Errorf("Failed to check watched wallet: %v", err)
 			continue
 		}
 
@@ -459,13 +546,39 @@ func (ep *EthereumProcessor) processUSDTTransaction(ctx context.Context, tx *typ
 
 		networkFee := new(big.Int).Mul(gasUsed, gasPrice)
 
-		// Create deposit event
+		if isFromWatched && !isToWatched {
+			withdrawal := &bloopTypes.WalletWithdrawal{
+				TxHash:        tx.Hash().Hex(),
+				WalletID:      fromWalletID,
+				WalletAddress: from.Hex(),
+				ToAddress:     to.Hex(),
+				Amount:        formatToken(amount, ep.config.USDTDecimals),
+				Currency:      bloopTypes.USDT,
+				Network:       ep.network,
+				BlockNumber:   blockNumber,
+				Confirmations: 1,
+				Timestamp:     ep.BlockToTimestamp(ctx, blockNumber),
+				NetworkFee:    formatEther(networkFee),
+				Status:        bloopTypes.StatusConfirmed,
+			}
+
+			if ep.baseTracker != nil {
+				if err := ep.baseTracker.PublishWithdrawal(ctx, withdrawal); err != nil {
+					ep.logger.Errorf("Failed to publish USDT withdrawal: %v", err)
+				}
+			}
+		}
+
+		if !isToWatched {
+			continue
+		}
+
+		// Create deposit event (RawData omitted to reduce memory footprint)
 		deposit := &bloopTypes.WalletDeposit{
 			TxHash:        tx.Hash().Hex(),
-			WalletID:      walletID,
+			WalletID:      toWalletID,
 			WalletAddress: to.Hex(),
 			FromAddress:   from.Hex(),
-			// FIXIME: take from config, the decimals
 			Amount:        formatToken(amount, ep.config.USDTDecimals),
 			Currency:      bloopTypes.USDT,
 			Network:       ep.network,
@@ -474,11 +587,6 @@ func (ep *EthereumProcessor) processUSDTTransaction(ctx context.Context, tx *typ
 			Timestamp:     ep.BlockToTimestamp(ctx, blockNumber),
 			NetworkFee:    formatEther(networkFee),
 			Status:        bloopTypes.StatusConfirmed,
-			RawData: map[string]interface{}{
-				"transaction": tx,
-				"receipt":     receipt,
-				"log":         log,
-			},
 		}
 
 		// Publish deposit event using base tracker
@@ -525,26 +633,59 @@ func (ep *EthereumProcessor) getBlockTransactions(ctx context.Context, blockNumb
 	var block *types.Block
 	var err error
 
-	if ep.ominiClient != nil {
-		// Use dedicated omini client for block fetching (supports all transaction types)
-		// This is the expensive quoted RPC call, but blocks are only fetched once per processing
-		block, err = ep.ominiClient.BlockByNumber(ctx, big.NewInt(int64(blockNumber)))
+	// Check if we're in light mode
+	if ep.config.BlockFetchMode == "light" {
+		ep.logger.Debugf("Using light mode (GetBlockVerbose) for block %d", blockNumber)
+		// Use GetBlockVerbose which fetches transactions individually with RPC rotation
+		blockVerbose, err := ep.client.GetBlockVerbose(ctx, blockNumber)
 		if err != nil {
-			ep.logger.Warnf("Omini client failed for block %d, falling back to regular client: %v", blockNumber, err)
-			// Fall back to regular client
+			return nil, fmt.Errorf("failed to get block verbose: %w", err)
+		}
+
+		// Convert EthBlockVerbose to types.Block
+		header := &types.Header{
+			ParentHash: blockVerbose.ParentHash,
+			Number:     big.NewInt(int64(blockVerbose.Number)),
+			Time:       blockVerbose.Time,
+		}
+		block = types.NewBlockWithHeader(header).WithBody(types.Body{
+			Transactions: blockVerbose.Transactions,
+		})
+	} else {
+		// Full mode: fetch entire block with all transactions in one call
+		ep.logger.Debugf("Using full mode for block %d", blockNumber)
+
+		// Try omini clients with rotation
+		ominiClient, ominiLimiter := ep.getNextOminiClient()
+		if ominiClient != nil && ominiLimiter != nil {
+			// Wait for rate limiter before making the expensive call
+			if err := ominiLimiter.Wait(ctx); err != nil {
+				ep.logger.Warnf("Omini rate limiter error for block %d: %v", blockNumber, err)
+				// Fall back to regular client
+				block, err = ep.client.BlockByNumber(ctx, big.NewInt(int64(blockNumber)))
+			} else {
+				// Use dedicated omini client for block fetching (supports all transaction types)
+				// This is the expensive quoted RPC call, but blocks are only fetched once per processing
+				block, err = ominiClient.BlockByNumber(ctx, big.NewInt(int64(blockNumber)))
+				if err != nil {
+					ep.logger.Warnf("Omini client failed for block %d, falling back to regular client: %v", blockNumber, err)
+					// Fall back to regular client
+					block, err = ep.client.BlockByNumber(ctx, big.NewInt(int64(blockNumber)))
+				}
+			}
+		} else {
+			// Use regular client if no omini clients available
 			block, err = ep.client.BlockByNumber(ctx, big.NewInt(int64(blockNumber)))
 		}
-	} else {
-		// Use regular client
-		block, err = ep.client.BlockByNumber(ctx, big.NewInt(int64(blockNumber)))
+
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	if err != nil {
-		return nil, err
-	}
-
-	// Store in cache with a modest TTL so immediate retries don't hit omini again
-	if err := ep.storage.SetCache(ctx, cacheKey, block, 30*time.Minute); err != nil {
+	// Store in cache with short TTL - blocks are only needed for immediate retry scenarios
+	// Reduced from 30 minutes to 2 minutes to lower memory pressure
+	if err := ep.storage.SetCache(ctx, cacheKey, block, 2*time.Minute); err != nil {
 		ep.logger.Warnf("Failed to cache block %d: %v", blockNumber, err)
 	}
 

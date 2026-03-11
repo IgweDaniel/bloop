@@ -17,7 +17,7 @@ echo "⏹️  Press Ctrl+C to stop"
 echo ""
 
 # Set RabbitMQ URL if not already set
-export RABBITMQ_URL=${RABBITMQ_URL:-"amqp://bloop:bloop123@localhost:5673/"}
+export RABBITMQ_URL=${RABBITMQ_URL:-"amqp://rabbituser:rabbitpassword@localhost:5677"}
 
 # Run the test listener
 ./bin/test-listener

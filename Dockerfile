@@ -32,4 +32,9 @@ USER bloop
 
 EXPOSE 8080
 
+# Memory optimization: GOGC controls GC aggressiveness (lower = more frequent GC = less memory)
+# GOMEMLIMIT sets a soft memory limit for the Go runtime
+ENV GOGC=50
+ENV GOMEMLIMIT=512MiB
+
 CMD ["./main"]

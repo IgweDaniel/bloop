@@ -51,6 +51,23 @@ type WalletDeposit struct {
 	RawData       interface{}       `json:"raw_data,omitempty"`
 }
 
+// WalletWithdrawal represents a detected withdrawal from a watched wallet
+type WalletWithdrawal struct {
+	TxHash        string            `json:"tx_hash"`
+	WalletID      string            `json:"wallet_id"`
+	WalletAddress string            `json:"wallet_address"`
+	ToAddress     string            `json:"to_address"`
+	Amount        string            `json:"amount"`
+	Currency      Currency          `json:"currency"`
+	Network       BlockchainType    `json:"network"`
+	BlockNumber   uint64            `json:"block_number"`
+	Confirmations uint64            `json:"confirmations"`
+	Timestamp     time.Time         `json:"timestamp"`
+	NetworkFee    string            `json:"network_fee"`
+	Status        TransactionStatus `json:"status"`
+	RawData       interface{}       `json:"raw_data,omitempty"`
+}
+
 // Block represents a blockchain block
 type Block struct {
 	Number       uint64    `json:"number"`
@@ -118,6 +135,7 @@ type Event struct {
 // EventType constants
 const (
 	EventTypeWalletDeposit  = "wallet.deposit"
+	EventTypeWalletWithdraw = "wallet.withdrawal"
 	EventTypeBlockProcessed = "block.processed"
 	EventTypeProviderHealth = "provider.health"
 )

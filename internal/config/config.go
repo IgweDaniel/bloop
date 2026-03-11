@@ -43,19 +43,24 @@ type RabbitMQConfig struct {
 }
 
 type EthereumConfig struct {
-	RPCURLs             []string      `mapstructure:"rpc_urls"`
-	WSURL               string        `mapstructure:"ws_url"`
-	OminiRPCURL         string        `mapstructure:"omini_rpc_url"`
-	USDTContract        string        `mapstructure:"usdt_contract"`
-	USDTDecimals        int32         `mapstructure:"usdt_decimals"`
-	Confirmations       int           `mapstructure:"confirmations"`
-	BatchSize           int           `mapstructure:"batch_size"`
-	MaxConcurrentBlocks int           `mapstructure:"max_concurrent_blocks"`
-	RPCTimeout          time.Duration `mapstructure:"rpc_timeout"`
-	RetryAttempts       int           `mapstructure:"retry_attempts"`
-	RetryDelay          time.Duration `mapstructure:"retry_delay"`
-	IsActive            bool          `mapstructure:"is_active"`
-	SkipNative          bool          `mapstructure:"skip_native"` // if true, skip checking native; if false (zero value), check native
+	RPCURLs                []string      `mapstructure:"rpc_urls"`
+	WSURL                  string        `mapstructure:"ws_url"`
+	OminiRPCURL            string        `mapstructure:"omini_rpc_url"`             // Deprecated: use OminiRPCURLs
+	OminiRPCURLs           []string      `mapstructure:"omini_rpc_urls"`            // Multiple omini RPC URLs for rotation
+	OminiRequestsPerSecond int           `mapstructure:"omini_requests_per_second"` // Rate limit for omini clients
+	OminiRequestsBurst     int           `mapstructure:"omini_requests_burst"`      // Burst capacity for omini clients
+	USDTContract           string        `mapstructure:"usdt_contract"`
+	USDTDecimals           int32         `mapstructure:"usdt_decimals"`
+	Confirmations          int           `mapstructure:"confirmations"`
+	BatchSize              int           `mapstructure:"batch_size"`
+	MaxConcurrentBlocks    int           `mapstructure:"max_concurrent_blocks"`
+	RPCTimeout             time.Duration `mapstructure:"rpc_timeout"`
+	RetryAttempts          int           `mapstructure:"retry_attempts"`
+	RetryDelay             time.Duration `mapstructure:"retry_delay"`
+	BlockFetchMode         string        `mapstructure:"block_fetch_mode"`     // "light" or "full" - light uses GetBlockVerbose with RPC rotation
+	TxFetchConcurrency     int           `mapstructure:"tx_fetch_concurrency"` // Concurrency for fetching individual transactions in light mode
+	IsActive               bool          `mapstructure:"is_active"`
+	SkipNative             bool          `mapstructure:"skip_native"` // if true, skip checking native; if false (zero value), check native
 }
 
 // BitcoinConfig contains Bitcoin-specific configuration
@@ -123,27 +128,31 @@ func setDefaults() {
 	viper.SetDefault("server.write_timeout", "30s")
 
 	viper.SetDefault("redis.url", "redis://localhost:6379")
-	viper.SetDefault("redis.pool_size", 100)
-	viper.SetDefault("redis.min_idle_conns", 10)
+	viper.SetDefault("redis.pool_size", 20)      // Reduced for lower memory usage
+	viper.SetDefault("redis.min_idle_conns", 5)  // Reduced for lower memory usage
 
 	viper.SetDefault("rabbitmq.exchange", "blockchain.events")
 	viper.SetDefault("rabbitmq.queue_prefix", "bloop")
 	viper.SetDefault("rabbitmq.prefetch_count", 100)
 
 	viper.SetDefault("ethereum.confirmations", 5)
-	viper.SetDefault("ethereum.batch_size", 50)
-	viper.SetDefault("ethereum.max_concurrent_blocks", 5)
+	viper.SetDefault("ethereum.batch_size", 25)              // Reduced from 50 for lower memory
+	viper.SetDefault("ethereum.max_concurrent_blocks", 5)    // Keep at 5 for memory efficiency
 	viper.SetDefault("ethereum.rpc_timeout", "30s")
 	viper.SetDefault("ethereum.retry_attempts", 3)
 	viper.SetDefault("ethereum.retry_delay", "2s")
+	viper.SetDefault("ethereum.block_fetch_mode", "light")   // Light mode uses less memory
+	viper.SetDefault("ethereum.tx_fetch_concurrency", 10)    // Reduced from 20
+	viper.SetDefault("ethereum.omini_requests_per_second", 5)
+	viper.SetDefault("ethereum.omini_requests_burst", 10)
 
 	viper.SetDefault("bitcoin.confirmations", 1)
-	viper.SetDefault("bitcoin.batch_size", 20)
+	viper.SetDefault("bitcoin.batch_size", 10)               // Reduced from 20
 	viper.SetDefault("bitcoin.max_concurrent_blocks", 2)
 	viper.SetDefault("bitcoin.rpc_timeout", "30s")
 	viper.SetDefault("bitcoin.retry_attempts", 3)
 	viper.SetDefault("bitcoin.retry_delay", "2s")
-	viper.SetDefault("bitcoin.tx_fetch_concurrency", 20)
+	viper.SetDefault("bitcoin.tx_fetch_concurrency", 10)     // Reduced from 20
 	viper.SetDefault("bitcoin.requeue_delay", "5s")
 	viper.SetDefault("bitcoin.requests_per_second", 3)
 	viper.SetDefault("bitcoin.requests_burst", 5)

@@ -118,6 +118,12 @@ func (r *RedisStorage) SetLastProcessedBlock(ctx context.Context, network types.
 	return r.client.HSet(ctx, key, field, blockNumber).Err()
 }
 
+func (r *RedisStorage) ForceSetLastProcessedBlock(ctx context.Context, network types.BlockchainType, blockNumber uint64) error {
+	key := "last_processed_blocks"
+	field := string(network)
+	return r.client.HSet(ctx, key, field, blockNumber).Err()
+}
+
 func (r *RedisStorage) GetLastProcessedBlock(ctx context.Context, network types.BlockchainType) (uint64, error) {
 	key := "last_processed_blocks"
 	result, err := r.client.HGet(ctx, key, string(network)).Result()

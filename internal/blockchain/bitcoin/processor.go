@@ -229,6 +229,75 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 	}
 
 	for _, tx := range block.Tx {
+		watchedInputWalletID := ""
+		watchedInputAddress := ""
+		multiWallet := false
+		for _, vin := range tx.Vin {
+			addr := vin.Prevout.Address
+			if addr == "" {
+				continue
+			}
+			walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, addr)
+			if err != nil {
+				return false, err
+			}
+			if !isWatched {
+				continue
+			}
+			if watchedInputWalletID == "" {
+				watchedInputWalletID = walletID
+				watchedInputAddress = addr
+				continue
+			}
+			if walletID != watchedInputWalletID {
+				multiWallet = true
+				break
+			}
+		}
+
+		if watchedInputWalletID != "" && !multiWallet {
+			externalAmount := 0.0
+			externalTo := ""
+			for _, vout := range tx.Vout {
+				if len(vout.ScriptPubKey.Addresses) == 0 {
+					continue
+				}
+				addr := vout.ScriptPubKey.Addresses[0]
+				_, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, addr)
+				if err != nil {
+					return false, err
+				}
+				if isWatched {
+					continue
+				}
+				externalAmount += vout.Value
+				if externalTo == "" {
+					externalTo = addr
+				}
+			}
+			if externalAmount > 0 {
+				withdrawal := &types.WalletWithdrawal{
+					TxHash:        tx.Txid,
+					WalletID:      watchedInputWalletID,
+					WalletAddress: watchedInputAddress,
+					ToAddress:     externalTo,
+					Amount:        fmt.Sprintf("%.8f", externalAmount),
+					Currency:      types.BTC,
+					Network:       types.Bitcoin,
+					BlockNumber:   blockNumber,
+					Confirmations: 1,
+					Timestamp:     time.Unix(block.Time, 0).UTC(),
+					NetworkFee:    "",
+					Status:        types.StatusConfirmed,
+				}
+				if bp.baseTracker != nil {
+					if err := bp.baseTracker.PublishWithdrawal(ctx, withdrawal); err != nil {
+						bp.logger.Errorf("publish withdrawal: %v", err)
+					}
+				}
+			}
+		}
+
 		for _, vout := range tx.Vout {
 			if len(vout.ScriptPubKey.Addresses) == 0 {
 				continue

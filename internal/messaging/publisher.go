@@ -15,6 +15,7 @@ import (
 type Publisher interface {
 	Publish(ctx context.Context, event *types.Event) error
 	PublishDeposit(ctx context.Context, deposit *types.WalletDeposit) error
+	PublishWithdrawal(ctx context.Context, withdrawal *types.WalletWithdrawal) error
 	Close() error
 }
 
@@ -128,6 +129,18 @@ func (p *RabbitMQPublisher) PublishDeposit(ctx context.Context, deposit *types.W
 	return p.Publish(ctx, event)
 }
 
+// PublishWithdrawal publishes a wallet withdrawal event
+func (p *RabbitMQPublisher) PublishWithdrawal(ctx context.Context, withdrawal *types.WalletWithdrawal) error {
+	event := &types.Event{
+		Type:      types.EventTypeWalletWithdraw,
+		Payload:   withdrawal,
+		Timestamp: time.Now(),
+		Source:    string(withdrawal.Network),
+	}
+
+	return p.Publish(ctx, event)
+}
+
 // Close closes the publisher connection
 func (p *RabbitMQPublisher) Close() error {
 	if p.channel != nil {
@@ -147,6 +160,10 @@ func (n *NoOpPublisher) Publish(ctx context.Context, event *types.Event) error {
 }
 
 func (n *NoOpPublisher) PublishDeposit(ctx context.Context, deposit *types.WalletDeposit) error {
+	return nil
+}
+
+func (n *NoOpPublisher) PublishWithdrawal(ctx context.Context, withdrawal *types.WalletWithdrawal) error {
 	return nil
 }
 
@@ -178,6 +195,12 @@ func (w *WebhookPublisher) Publish(ctx context.Context, event *types.Event) erro
 func (w *WebhookPublisher) PublishDeposit(ctx context.Context, deposit *types.WalletDeposit) error {
 	// TODO: Implement webhook publishing
 	w.logger.Info("Webhook deposit publishing not implemented yet")
+	return nil
+}
+
+func (w *WebhookPublisher) PublishWithdrawal(ctx context.Context, withdrawal *types.WalletWithdrawal) error {
+	// TODO: Implement webhook publishing
+	w.logger.Info("Webhook withdrawal publishing not implemented yet")
 	return nil
 }
 

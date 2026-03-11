@@ -277,6 +277,18 @@ func (c *EthereumClient) BlockByNumber(ctx context.Context, number *big.Int) (*t
 	return block, err
 }
 
+// TransactionByHash fetches a single transaction by hash
+func (c *EthereumClient) TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error) {
+	var tx *types.Transaction
+	var isPending bool
+	err := c.executeWithRetry(ctx, func(client *ethclient.Client) error {
+		var err error
+		tx, isPending, err = client.TransactionByHash(ctx, hash)
+		return err
+	})
+	return tx, isPending, err
+}
+
 func (c *EthereumClient) TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
 	var receipt *types.Receipt
 	err := c.executeWithRetry(ctx, func(client *ethclient.Client) error {
@@ -354,4 +366,129 @@ func (c *EthereumClient) GetProviderStatuses() []*ProviderStatus {
 		status.mu.RUnlock()
 	}
 	return statuses
+}
+
+// EthBlockVerbose represents a block with full transaction details
+type EthBlockVerbose struct {
+	Hash         common.Hash
+	Number       uint64
+	Time         uint64
+	ParentHash   common.Hash
+	Transactions []*types.Transaction
+}
+
+// GetBlockVerbose fetches a block with all transaction details by fetching each transaction individually.
+// This is more efficient for free RPC endpoints with rotation as it distributes the load across providers
+// and avoids expensive single calls to fetch full blocks with transaction bodies.
+// Similar to Bitcoin's GetBlockVerbose, it uses concurrency control and rate limiting.
+func (c *EthereumClient) GetBlockVerbose(ctx context.Context, blockNumber uint64) (*EthBlockVerbose, error) {
+	// First, get the block header (lightweight call)
+	header, err := c.HeaderByNumber(ctx, big.NewInt(int64(blockNumber)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block header: %w", err)
+	}
+
+	// Get transaction hashes (lightweight - only fetches hashes, not full tx data)
+	// We use eth_getBlockByNumber with transactions=false to get only tx hashes
+	var blockData struct {
+		Hash         common.Hash   `json:"hash"`
+		Number       string        `json:"number"`
+		Timestamp    string        `json:"timestamp"`
+		ParentHash   common.Hash   `json:"parentHash"`
+		Transactions []common.Hash `json:"transactions"`
+	}
+
+	provider, _, err := c.getHealthyProvider()
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the corresponding RPC client
+	var rpcClient *rpc.Client
+	for i, p := range c.providers {
+		if p == provider {
+			rpcClient = c.rpcClients[i]
+			break
+		}
+	}
+
+	if rpcClient == nil {
+		return nil, fmt.Errorf("could not find RPC client for provider")
+	}
+
+	// Fetch block with transaction hashes only (not full transaction data)
+	if err := rpcClient.CallContext(ctx, &blockData, "eth_getBlockByNumber", fmt.Sprintf("0x%x", blockNumber), false); err != nil {
+		return nil, fmt.Errorf("failed to get block transaction hashes: %w", err)
+	}
+
+	txHashes := blockData.Transactions
+	if len(txHashes) == 0 {
+		// Empty block
+		return &EthBlockVerbose{
+			Hash:         header.Hash(),
+			Number:       header.Number.Uint64(),
+			Time:         header.Time,
+			ParentHash:   header.ParentHash,
+			Transactions: []*types.Transaction{},
+		}, nil
+	}
+
+	// Fetch each transaction concurrently with rate limiting (similar to Bitcoin implementation)
+	fetchConcurrency := 20 // Can be made configurable
+	if c.config.TxFetchConcurrency > 0 {
+		fetchConcurrency = c.config.TxFetchConcurrency
+	}
+
+	results := make([]*types.Transaction, len(txHashes))
+	type txResult struct {
+		idx int
+		tx  *types.Transaction
+		err error
+	}
+
+	sem := make(chan struct{}, fetchConcurrency)
+	wg := sync.WaitGroup{}
+	resCh := make(chan txResult, len(txHashes))
+
+	for i, txHash := range txHashes {
+		wg.Add(1)
+		go func(i int, txHash common.Hash) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// Rate limiting
+			if err := c.rateLimiter.Wait(ctx); err != nil {
+				resCh <- txResult{idx: i, err: err}
+				return
+			}
+
+			// Fetch transaction using the rotation client
+			tx, _, err := c.TransactionByHash(ctx, txHash)
+			if err != nil {
+				resCh <- txResult{idx: i, err: fmt.Errorf("failed to fetch tx %s: %w", txHash.Hex(), err)}
+				return
+			}
+
+			resCh <- txResult{idx: i, tx: tx}
+		}(i, txHash)
+	}
+
+	wg.Wait()
+	close(resCh)
+
+	for r := range resCh {
+		if r.err != nil {
+			return nil, r.err
+		}
+		results[r.idx] = r.tx
+	}
+
+	return &EthBlockVerbose{
+		Hash:         header.Hash(),
+		Number:       header.Number.Uint64(),
+		Time:         header.Time,
+		ParentHash:   header.ParentHash,
+		Transactions: results,
+	}, nil
 }

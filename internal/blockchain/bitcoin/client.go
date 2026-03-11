@@ -25,8 +25,16 @@ type btcVout struct {
 	} `json:"scriptPubKey"`
 }
 
+type btcVin struct {
+	Prevout struct {
+		Value   int64  `json:"value"`
+		Address string `json:"scriptpubkey_address"`
+	} `json:"prevout"`
+}
+
 type btcTx struct {
 	Txid string    `json:"txid"`
+	Vin  []btcVin  `json:"vin"`
 	Vout []btcVout `json:"vout"`
 }
 
@@ -208,6 +216,12 @@ func (c *restClient) GetBlockVerbose(ctx context.Context, hash string) (*btcBloc
 			}
 			var txBody struct {
 				Txid string `json:"txid"`
+				Vin  []struct {
+					Prevout struct {
+						Value   int64  `json:"value"`
+						Address string `json:"scriptpubkey_address"`
+					} `json:"prevout"`
+				} `json:"vin"`
 				Vout []struct {
 					Value   int64  `json:"value"`
 					Address string `json:"scriptpubkey_address"`
@@ -220,6 +234,17 @@ func (c *restClient) GetBlockVerbose(ctx context.Context, hash string) (*btcBloc
 			}
 			respTx.Body.Close()
 			tx := btcTx{Txid: txBody.Txid}
+			for _, v := range txBody.Vin {
+				tx.Vin = append(tx.Vin, btcVin{
+					Prevout: struct {
+						Value   int64  `json:"value"`
+						Address string `json:"scriptpubkey_address"`
+					}{
+						Value:   v.Prevout.Value,
+						Address: v.Prevout.Address,
+					},
+				})
+			}
 			for _, v := range txBody.Vout {
 				valueBtc := float64(v.Value) / 1e8
 				addrs := []string{}

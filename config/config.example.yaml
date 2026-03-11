@@ -22,17 +22,31 @@ ethereum:
     - "https://ethereum-sepolia-rpc.publicnode.com"
     - "https://eth-sepolia.public.blastapi.io"
   ws_url: "wss://ethereum-sepolia-rpc.publicnode.com"
-  # Optional: RPC with extended features suitable for fetching full blocks with transactions.
-  # e.g., an Alchemy URL or any provider that reliably returns full blocks.
+  # Optional: Multiple omini RPC URLs with extended features for fetching full blocks with transactions.
+  # e.g., Alchemy, Infura, or any provider that reliably returns full blocks. Rotation is supported.
   # Do not commit secrets here.
-  omini_rpc_url: ""
+  omini_rpc_urls:
+    - ""
+  # Deprecated: use omini_rpc_urls instead
+  # omini_rpc_url: ""
+  # Rate limiting for omini clients - adjust based on your provider's limits
+  # For example: Alchemy free tier is 300 req/sec, paid tiers vary
+  omini_requests_per_second: 5
+  omini_requests_burst: 10
   usdt_contract: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+  usdt_decimals: 6
   confirmations: 5
   batch_size: 50
   max_concurrent_blocks: 5
+  # Block fetch mode: "light" uses GetBlockVerbose (fetches each tx individually with RPC rotation)
+  # "full" fetches entire block with all transactions in one call (more expensive for quoted RPCs)
+  block_fetch_mode: light
+  tx_fetch_concurrency: 20
   rpc_timeout: 30s
   retry_attempts: 3
   retry_delay: 2s
+  skip_native: false
+  is_active: true
 
 monitoring:
   scan_window: 1000
@@ -64,12 +78,21 @@ bsc:
     - "https://bsc-testnet.public.blastapi.io"
     - "https://bsc-testnet-rpc.publicnode.com"
   ws_url: "wss://bsc-testnet-rpc.publicnode.com"
-  omini_rpc_url: "https://bsc-testnet-rpc.publicnode.com"
+  # Multiple omini RPC URLs for rotation (premium providers with full block support)
+  omini_rpc_urls:
+    - ""
+  # Rate limiting for omini clients
+  omini_requests_per_second: 5
+  omini_requests_burst: 10
   usdt_contract: "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd"
+  usdt_decimals: 18
   confirmations: 5
   batch_size: 50
   max_concurrent_blocks: 20
+  block_fetch_mode: light
+  tx_fetch_concurrency: 20
   rpc_timeout: 30s
   retry_attempts: 3
   retry_delay: 2s
+  skip_native: true
   is_active: true
