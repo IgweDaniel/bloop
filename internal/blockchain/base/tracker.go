@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/igwedaniel/bloop/internal/messaging"
@@ -72,6 +73,13 @@ type BaseTracker struct {
 	errorCount      uint64
 	startTime       time.Time
 
+	lastEnqueued            uint64
+	lastDequeued            uint64
+	lastProcessing          uint64
+	skippedChannelFull      uint64
+	skippedAlreadyProcessed uint64
+	blockGapConsecutive     uint64
+
 	blockCh chan uint64
 }
 
@@ -83,6 +91,10 @@ func NewBaseTracker(
 	logger *logrus.Logger,
 	config BaseTrackerConfig,
 ) *BaseTracker {
+	queueCap := config.MaxConcurrentBlocks * 10
+	if queueCap < 50 {
+		queueCap = 50
+	}
 	return &BaseTracker{
 		processor:      processor,
 		storage:        storage,
@@ -92,7 +104,7 @@ func NewBaseTracker(
 		blockSemaphore: semaphore.NewWeighted(int64(config.MaxConcurrentBlocks)),
 		rpcSemaphore:   semaphore.NewWeighted(20), // Reduced from 50 for lower memory usage
 		stopCh:         make(chan struct{}),
-		blockCh:        make(chan uint64, 20),     // Reduced from 100 for lower memory usage
+		blockCh:        make(chan uint64, queueCap),
 		startTime:      time.Now(),
 	}
 }
@@ -179,16 +191,53 @@ func (bt *BaseTracker) GetStats() types.TrackerStats {
 		currentBlock = 0
 	}
 
+	var safeHead uint64
+	if currentBlock > uint64(bt.config.Confirmations) {
+		safeHead = currentBlock - uint64(bt.config.Confirmations)
+	}
+	var blockGap uint64
+	if safeHead > lastBlock {
+		blockGap = safeHead - lastBlock
+	}
+
+	var inFlightTxs uint64
+	if p, ok := bt.processor.(interface{ InFlightTxs() uint64 }); ok {
+		inFlightTxs = p.InFlightTxs()
+	}
+	var apiProviders map[string]uint64
+	var apiProviderErrors map[string]uint64
+	var apiProviderLast string
+	if p, ok := bt.processor.(interface {
+		ProviderStats() (map[string]uint64, map[string]uint64, string)
+	}); ok {
+		apiProviders, apiProviderErrors, apiProviderLast = p.ProviderStats()
+	}
+
 	return types.TrackerStats{
-		Network:            bt.processor.GetNetwork(),
-		IsRunning:          bt.isRunning,
-		ProcessedBlocks:    bt.processedBlocks,
-		ProcessedTxs:       bt.processedTxs,
-		WatchedWallets:     len(watchedWallets),
-		LastBlockHeight:    lastBlock,
-		CurrentBlockHeight: currentBlock,
-		Uptime:             time.Since(bt.startTime).String(),
-		ErrorCount:         bt.errorCount,
+		Network:             bt.processor.GetNetwork(),
+		IsRunning:           bt.isRunning,
+		ProcessedBlocks:     bt.processedBlocks,
+		ProcessedTxs:        bt.processedTxs,
+		WatchedWallets:      len(watchedWallets),
+		LastBlockHeight:     lastBlock,
+		CurrentBlockHeight:  currentBlock,
+		SafeHead:            safeHead,
+		BlockGap:            blockGap,
+		Confirmations:       bt.config.Confirmations,
+		BlockQueueLen:       len(bt.blockCh),
+		BlockQueueCap:       cap(bt.blockCh),
+		LastEnqueuedBlock:   atomic.LoadUint64(&bt.lastEnqueued),
+		LastDequeuedBlock:   atomic.LoadUint64(&bt.lastDequeued),
+		LastProcessingBlock: atomic.LoadUint64(&bt.lastProcessing),
+		SkippedChannelFull:  atomic.LoadUint64(&bt.skippedChannelFull),
+		SkippedProcessed:    atomic.LoadUint64(&bt.skippedAlreadyProcessed),
+		BlockGapConsecutive: atomic.LoadUint64(&bt.blockGapConsecutive),
+		InFlightTxs:         inFlightTxs,
+		APIProviders:        apiProviders,
+		APIProviderErrors:   apiProviderErrors,
+		APIProviderLast:     apiProviderLast,
+		Uptime:              time.Since(bt.startTime).String(),
+		ErrorCount:          bt.errorCount,
 	}
 }
 
@@ -214,6 +263,7 @@ func (bt *BaseTracker) blockProcessorLoop(ctx context.Context) {
 		case <-bt.stopCh:
 			return
 		case blockNumber := <-bt.blockCh:
+			atomic.StoreUint64(&bt.lastDequeued, blockNumber)
 			bt.enqueueBlock(ctx, blockNumber, "realtime")
 		}
 	}
@@ -391,6 +441,7 @@ func (bt *BaseTracker) performPolling(ctx context.Context) {
 
 		select {
 		case bt.blockCh <- blockNum:
+			atomic.StoreUint64(&bt.lastEnqueued, blockNum)
 		case <-ctx.Done():
 			return
 		case <-bt.stopCh:
@@ -398,6 +449,7 @@ func (bt *BaseTracker) performPolling(ctx context.Context) {
 		default:
 			// Channel full, skip this block for now
 			bt.logger.Debugf("Block channel full, skipping block %d", blockNum)
+			atomic.AddUint64(&bt.skippedChannelFull, 1)
 		}
 	}
 }
@@ -412,6 +464,7 @@ func (bt *BaseTracker) enqueueBlock(ctx context.Context, blockNumber uint64, sou
 		return
 	}
 	if processed {
+		atomic.AddUint64(&bt.skippedAlreadyProcessed, 1)
 		return
 	}
 
@@ -434,6 +487,7 @@ func (bt *BaseTracker) enqueueBlock(ctx context.Context, blockNumber uint64, sou
 
 // processBlockSafely processes a block with error handling and metrics
 func (bt *BaseTracker) processBlockSafely(ctx context.Context, blockNumber uint64, source string) error {
+	atomic.StoreUint64(&bt.lastProcessing, blockNumber)
 	startTime := time.Now()
 	network := bt.processor.GetNetwork()
 
@@ -515,14 +569,66 @@ func (bt *BaseTracker) reportHealth() {
 	blocksPerSecond := float64(bt.processedBlocks) / uptime.Seconds()
 	txsPerSecond := float64(bt.processedTxs) / uptime.Seconds()
 
+	var (
+		lastProcessed uint64
+		currentBlock  uint64
+		safeHead      uint64
+		blockGap      uint64
+	)
+	lastProcessed, _ = bt.storage.GetLastProcessedBlock(context.Background(), bt.processor.GetNetwork())
+	if cb, err := bt.processor.GetCurrentBlockHeight(context.Background()); err == nil {
+		currentBlock = cb
+		if currentBlock > uint64(bt.config.Confirmations) {
+			safeHead = currentBlock - uint64(bt.config.Confirmations)
+		}
+		if safeHead > lastProcessed {
+			blockGap = safeHead - lastProcessed
+		}
+	} else {
+		bt.logger.Warnf("Failed to get current block height for health report: %v", err)
+	}
+
+	const gapWarnThreshold = 20
+	const gapWarnConsecutiveThreshold = 3
+	if blockGap > gapWarnThreshold {
+		atomic.AddUint64(&bt.blockGapConsecutive, 1)
+	} else {
+		atomic.StoreUint64(&bt.blockGapConsecutive, 0)
+	}
+	gapConsecutive := atomic.LoadUint64(&bt.blockGapConsecutive)
+	if blockGap > gapWarnThreshold && (gapConsecutive == gapWarnConsecutiveThreshold || gapConsecutive%10 == 0) {
+		bt.logger.WithFields(logrus.Fields{
+			"network":         bt.processor.GetNetwork(),
+			"block_gap":       blockGap,
+			"gap_threshold":   gapWarnThreshold,
+			"gap_consecutive": gapConsecutive,
+			"last_processed":  lastProcessed,
+			"safe_head":       safeHead,
+			"queue_len":       len(bt.blockCh),
+			"queue_cap":       cap(bt.blockCh),
+		}).Warn("Block gap remains high")
+	}
+
 	bt.logger.WithFields(logrus.Fields{
-		"network":           bt.processor.GetNetwork(),
-		"uptime":            uptime,
-		"processed_blocks":  bt.processedBlocks,
-		"processed_txs":     bt.processedTxs,
-		"error_count":       bt.errorCount,
-		"blocks_per_second": blocksPerSecond,
-		"txs_per_second":    txsPerSecond,
+		"network":               bt.processor.GetNetwork(),
+		"uptime":                uptime,
+		"processed_blocks":      bt.processedBlocks,
+		"processed_txs":         bt.processedTxs,
+		"error_count":           bt.errorCount,
+		"blocks_per_second":     blocksPerSecond,
+		"txs_per_second":        txsPerSecond,
+		"last_block_height":     lastProcessed,
+		"current_block_height":  currentBlock,
+		"safe_head":             safeHead,
+		"block_gap":             blockGap,
+		"confirmations":         bt.config.Confirmations,
+		"block_queue_len":       len(bt.blockCh),
+		"block_queue_cap":       cap(bt.blockCh),
+		"last_enqueued_block":   atomic.LoadUint64(&bt.lastEnqueued),
+		"last_dequeued_block":   atomic.LoadUint64(&bt.lastDequeued),
+		"last_processing_block": atomic.LoadUint64(&bt.lastProcessing),
+		"skipped_channel_full":  atomic.LoadUint64(&bt.skippedChannelFull),
+		"skipped_processed":     atomic.LoadUint64(&bt.skippedAlreadyProcessed),
 	}).Info("Tracker health report")
 }
 

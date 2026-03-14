@@ -46,10 +46,24 @@ func (bp *BitcoinProcessor) SetBaseTracker(baseTracker *base.BaseTracker) {
 	bp.baseTracker = baseTracker
 }
 func (bp *BitcoinProcessor) GetNetwork() types.BlockchainType { return types.Bitcoin }
+func (bp *BitcoinProcessor) InFlightTxs() uint64 {
+	if rc, ok := bp.rpc.(interface{ InFlightTxs() uint64 }); ok {
+		return rc.InFlightTxs()
+	}
+	return 0
+}
+func (bp *BitcoinProcessor) ProviderStats() (map[string]uint64, map[string]uint64, string) {
+	if rc, ok := bp.rpc.(interface {
+		ProviderStats() (map[string]uint64, map[string]uint64, string)
+	}); ok {
+		return rc.ProviderStats()
+	}
+	return nil, nil, ""
+}
 
 func (bp *BitcoinProcessor) InitializeProviders(ctx context.Context) error {
 	// Prefer REST API if configured; else use JSON-RPC
-	rc, err := newRESTClient(bp.config)
+	rc, err := newBitcoinClient(bp.config, bp.logger)
 	if err != nil {
 		return err
 	}
@@ -222,13 +236,25 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 	if err != nil {
 		return false, err
 	}
+	bp.logger.WithFields(logrus.Fields{
+		"block_number": blockNumber,
+		"block_hash":   hash,
+	}).Debug("Fetched BTC block hash")
 	// verbosity 2 returns decoded txs
 	block, err := bp.rpc.GetBlockVerbose(ctx, hash)
 	if err != nil {
 		return false, err
 	}
+	bp.logger.WithFields(logrus.Fields{
+		"block_number": blockNumber,
+		"tx_count":     len(block.Tx),
+	}).Debug("Fetched BTC block transactions")
 
 	for _, tx := range block.Tx {
+		bp.logger.WithFields(logrus.Fields{
+			"block_number": blockNumber,
+			"txid":         tx.Txid,
+		}).Debug("Processing BTC transaction")
 		watchedInputWalletID := ""
 		watchedInputAddress := ""
 		multiWallet := false

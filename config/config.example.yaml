@@ -61,14 +61,17 @@ logging:
 
 bitcoin:
   api_url: "https://mempool.space/testnet/api"
+  api_urls:
+    - "https://mempool.space/testnet/api"
+    - "https://blockstream.info/testnet/api"
   ws_url: "wss://mempool.space/testnet/api/v1/ws"
   confirmations: 1
-  batch_size: 200
-  max_concurrent_blocks: 50
-  tx_fetch_concurrency: 20
+  batch_size: 10
+  max_concurrent_blocks: 5
+  tx_fetch_concurrency: 2
   requeue_delay: 5s
-  requests_per_second: 3
-  requests_burst: 5
+  requests_per_second: 5
+  requests_burst: 10
   rpc_timeout: 30s
   retry_attempts: 3
   retry_delay: 2s
