@@ -66,6 +66,7 @@ type EthereumConfig struct {
 // BitcoinConfig contains Bitcoin-specific configuration
 type BitcoinConfig struct {
 	APIURL              string        `mapstructure:"api_url"`
+	APIURLs             []string      `mapstructure:"api_urls"`
 	WSURL               string        `mapstructure:"ws_url"`
 	Confirmations       int           `mapstructure:"confirmations"`
 	BatchSize           int           `mapstructure:"batch_size"`
@@ -148,14 +149,14 @@ func setDefaults() {
 
 	viper.SetDefault("bitcoin.confirmations", 1)
 	viper.SetDefault("bitcoin.batch_size", 10)               // Reduced from 20
-	viper.SetDefault("bitcoin.max_concurrent_blocks", 2)
+	viper.SetDefault("bitcoin.max_concurrent_blocks", 5)
 	viper.SetDefault("bitcoin.rpc_timeout", "30s")
 	viper.SetDefault("bitcoin.retry_attempts", 3)
 	viper.SetDefault("bitcoin.retry_delay", "2s")
-	viper.SetDefault("bitcoin.tx_fetch_concurrency", 10)     // Reduced from 20
+	viper.SetDefault("bitcoin.tx_fetch_concurrency", 2)
 	viper.SetDefault("bitcoin.requeue_delay", "5s")
-	viper.SetDefault("bitcoin.requests_per_second", 3)
-	viper.SetDefault("bitcoin.requests_burst", 5)
+	viper.SetDefault("bitcoin.requests_per_second", 5)
+	viper.SetDefault("bitcoin.requests_burst", 10)
 	viper.SetDefault("bitcoin.ws_url", "")
 	viper.SetDefault("bitcoin.api_url", "")
 
