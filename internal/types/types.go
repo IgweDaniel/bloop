@@ -40,6 +40,7 @@ type WalletDeposit struct {
 	WalletID      string            `json:"wallet_id"`
 	WalletAddress string            `json:"wallet_address"`
 	FromAddress   string            `json:"from_address"`
+	Inputs        []WalletInput     `json:"inputs,omitempty"`
 	Amount        string            `json:"amount"`
 	Currency      Currency          `json:"currency"`
 	Network       BlockchainType    `json:"network"`
@@ -49,6 +50,12 @@ type WalletDeposit struct {
 	NetworkFee    string            `json:"network_fee"`
 	Status        TransactionStatus `json:"status"`
 	RawData       interface{}       `json:"raw_data,omitempty"`
+}
+
+// WalletInput represents a transaction input for UTXO-based chains
+type WalletInput struct {
+	Address string `json:"address"`
+	Amount  string `json:"amount"`
 }
 
 // WalletWithdrawal represents a detected withdrawal from a watched wallet
