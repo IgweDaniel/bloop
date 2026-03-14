@@ -328,6 +328,21 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 			if len(vout.ScriptPubKey.Addresses) == 0 {
 				continue
 			}
+			fromAddress := ""
+			inputs := make([]types.WalletInput, 0, len(tx.Vin))
+			for _, vin := range tx.Vin {
+				addr := vin.Prevout.Address
+				if addr != "" {
+					if fromAddress == "" {
+						fromAddress = addr
+					}
+					amount := float64(vin.Prevout.Value) / 1e8
+					inputs = append(inputs, types.WalletInput{
+						Address: addr,
+						Amount:  fmt.Sprintf("%.8f", amount),
+					})
+				}
+			}
 			for _, addr := range vout.ScriptPubKey.Addresses {
 				walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, addr)
 				if err != nil {
@@ -341,7 +356,8 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 					TxHash:        tx.Txid,
 					WalletID:      walletID,
 					WalletAddress: addr,
-					FromAddress:   "",
+					FromAddress:   fromAddress,
+					Inputs:        inputs,
 					Amount:        fmt.Sprintf("%.8f", vout.Value),
 					Currency:      types.BTC,
 					Network:       types.Bitcoin,
