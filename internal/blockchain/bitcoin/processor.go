@@ -258,11 +258,21 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 		watchedInputWalletID := ""
 		watchedInputAddress := ""
 		multiWallet := false
+		fromAddress := ""
+		inputs := make([]types.WalletInput, 0, len(tx.Vin))
 		for _, vin := range tx.Vin {
 			addr := vin.Prevout.Address
 			if addr == "" {
 				continue
 			}
+			if fromAddress == "" {
+				fromAddress = addr
+			}
+			amount := float64(vin.Prevout.Value) / 1e8
+			inputs = append(inputs, types.WalletInput{
+				Address: addr,
+				Amount:  fmt.Sprintf("%.8f", amount),
+			})
 			walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, addr)
 			if err != nil {
 				return false, err
@@ -284,6 +294,7 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 		if watchedInputWalletID != "" && !multiWallet {
 			externalAmount := 0.0
 			externalTo := ""
+			outputs := make([]types.WalletOutput, 0, len(tx.Vout))
 			for _, vout := range tx.Vout {
 				if len(vout.ScriptPubKey.Addresses) == 0 {
 					continue
@@ -297,6 +308,10 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 					continue
 				}
 				externalAmount += vout.Value
+				outputs = append(outputs, types.WalletOutput{
+					Address: addr,
+					Amount:  fmt.Sprintf("%.8f", vout.Value),
+				})
 				if externalTo == "" {
 					externalTo = addr
 				}
@@ -307,6 +322,7 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 					WalletID:      watchedInputWalletID,
 					WalletAddress: watchedInputAddress,
 					ToAddress:     externalTo,
+					Outputs:       outputs,
 					Amount:        fmt.Sprintf("%.8f", externalAmount),
 					Currency:      types.BTC,
 					Network:       types.Bitcoin,
@@ -322,26 +338,16 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 					}
 				}
 			}
+		} else if multiWallet {
+			bp.logger.WithFields(logrus.Fields{
+				"block_number": blockNumber,
+				"txid":         tx.Txid,
+			}).Info("Skipping withdrawal publish due to multiple watched input wallets")
 		}
 
 		for _, vout := range tx.Vout {
 			if len(vout.ScriptPubKey.Addresses) == 0 {
 				continue
-			}
-			fromAddress := ""
-			inputs := make([]types.WalletInput, 0, len(tx.Vin))
-			for _, vin := range tx.Vin {
-				addr := vin.Prevout.Address
-				if addr != "" {
-					if fromAddress == "" {
-						fromAddress = addr
-					}
-					amount := float64(vin.Prevout.Value) / 1e8
-					inputs = append(inputs, types.WalletInput{
-						Address: addr,
-						Amount:  fmt.Sprintf("%.8f", amount),
-					})
-				}
 			}
 			for _, addr := range vout.ScriptPubKey.Addresses {
 				walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, addr)
@@ -349,6 +355,11 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 					return false, err
 				}
 				if !isWatched {
+					continue
+				}
+				// If this tx already spent from a watched wallet, treat outputs back to the same
+				// wallet as change, not a new deposit.
+				if watchedInputWalletID != "" && walletID == watchedInputWalletID {
 					continue
 				}
 
