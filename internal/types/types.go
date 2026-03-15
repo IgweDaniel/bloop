@@ -58,12 +58,19 @@ type WalletInput struct {
 	Amount  string `json:"amount"`
 }
 
+// WalletOutput represents a transaction output for UTXO-based chains
+type WalletOutput struct {
+	Address string `json:"address"`
+	Amount  string `json:"amount"`
+}
+
 // WalletWithdrawal represents a detected withdrawal from a watched wallet
 type WalletWithdrawal struct {
 	TxHash        string            `json:"tx_hash"`
 	WalletID      string            `json:"wallet_id"`
 	WalletAddress string            `json:"wallet_address"`
 	ToAddress     string            `json:"to_address"`
+	Outputs       []WalletOutput    `json:"outputs,omitempty"`
 	Amount        string            `json:"amount"`
 	Currency      Currency          `json:"currency"`
 	Network       BlockchainType    `json:"network"`
