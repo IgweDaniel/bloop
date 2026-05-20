@@ -147,6 +147,23 @@ LOG_LEVEL="info"
 curl http://localhost:8080/health
 ```
 
+### Prometheus Metrics
+
+```bash
+curl http://localhost:9090/metrics
+```
+
+Key tracker metrics exposed per network label:
+
+- `bloop_tracker_block_gap`
+- `bloop_tracker_last_processed_block`
+- `bloop_tracker_safe_head`
+- `bloop_tracker_current_block_height`
+- `bloop_tracker_block_queue_len`
+- `bloop_tracker_error_count_total`
+- `bloop_tracker_skipped_channel_full_total`
+- `bloop_tracker_skipped_processed_total`
+
 ### Add Watched Wallet
 
 ```bash

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/igwedaniel/bloop/internal/messaging"
+	"github.com/igwedaniel/bloop/internal/monitoring"
 	"github.com/igwedaniel/bloop/internal/storage"
 	"github.com/igwedaniel/bloop/internal/types"
 	"github.com/sirupsen/logrus"
@@ -608,6 +609,24 @@ func (bt *BaseTracker) reportHealth() {
 			"queue_cap":       cap(bt.blockCh),
 		}).Warn("Block gap remains high")
 	}
+
+	monitoring.SetTrackerSnapshot(monitoring.TrackerSnapshot{
+		Network:            string(bt.processor.GetNetwork()),
+		BlockGap:           blockGap,
+		CurrentBlockHeight: currentBlock,
+		SafeHead:           safeHead,
+		LastProcessedBlock: lastProcessed,
+		BlockQueueLen:      len(bt.blockCh),
+		BlockQueueCap:      cap(bt.blockCh),
+		ProcessedBlocks:    bt.processedBlocks,
+		ProcessedTxs:       bt.processedTxs,
+		ErrorCount:         bt.errorCount,
+		SkippedChannelFull: atomic.LoadUint64(&bt.skippedChannelFull),
+		SkippedProcessed:   atomic.LoadUint64(&bt.skippedAlreadyProcessed),
+		BlocksPerSecond:    blocksPerSecond,
+		TxsPerSecond:       txsPerSecond,
+		UptimeSeconds:      uptime.Seconds(),
+	})
 
 	bt.logger.WithFields(logrus.Fields{
 		"network":               bt.processor.GetNetwork(),

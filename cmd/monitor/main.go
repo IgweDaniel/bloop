@@ -12,6 +12,7 @@ import (
 	"github.com/igwedaniel/bloop/internal/blockchain"
 	"github.com/igwedaniel/bloop/internal/config"
 	"github.com/igwedaniel/bloop/internal/messaging"
+	"github.com/igwedaniel/bloop/internal/monitoring"
 	"github.com/igwedaniel/bloop/internal/storage"
 	"github.com/igwedaniel/bloop/internal/types"
 	"github.com/sirupsen/logrus"
@@ -85,6 +86,13 @@ func main() {
 		}
 	}()
 
+	metricsServer := monitoring.NewServer(cfg.Monitoring.MetricsPort, logger)
+	go func() {
+		if err := metricsServer.Start(); err != nil {
+			logger.Errorf("Metrics server error: %v", err)
+		}
+	}()
+
 	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -100,6 +108,10 @@ func main() {
 	// Stop API server
 	if err := apiServer.Stop(shutdownCtx); err != nil {
 		logger.Errorf("Error stopping API server: %v", err)
+	}
+
+	if err := metricsServer.Stop(shutdownCtx); err != nil {
+		logger.Errorf("Error stopping metrics server: %v", err)
 	}
 
 	// Stop all trackers
