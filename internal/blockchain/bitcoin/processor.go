@@ -334,7 +334,7 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 				}
 				if bp.baseTracker != nil {
 					if err := bp.baseTracker.PublishWithdrawal(ctx, withdrawal); err != nil {
-						bp.logger.Errorf("publish withdrawal: %v", err)
+						return false, fmt.Errorf("publish withdrawal for tx %s in block %d: %w", tx.Txid, blockNumber, err)
 					}
 				}
 			}
@@ -380,7 +380,7 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 				}
 				if bp.baseTracker != nil {
 					if err := bp.baseTracker.PublishDeposit(ctx, dep); err != nil {
-						bp.logger.Errorf("publish deposit: %v", err)
+						return false, fmt.Errorf("publish deposit for tx %s in block %d: %w", tx.Txid, blockNumber, err)
 					}
 				}
 			}
