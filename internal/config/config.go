@@ -15,6 +15,7 @@ type Config struct {
 	RabbitMQ   RabbitMQConfig   `mapstructure:"rabbitmq"`
 	Ethereum   EthereumConfig   `mapstructure:"ethereum"`
 	Bitcoin    BitcoinConfig    `mapstructure:"bitcoin"`
+	Tron       TronConfig       `mapstructure:"tron"`
 	Bsc        EthereumConfig   `mapstructure:"bsc"`
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
@@ -80,6 +81,27 @@ type BitcoinConfig struct {
 	RequestsBurst       int           `mapstructure:"requests_burst"`
 	IsActive            bool          `mapstructure:"is_active"`
 }
+
+// TronConfig contains TRON-specific configuration.
+type TronConfig struct {
+	APIURL              string        `mapstructure:"api_url"`
+	APIURLs             []string      `mapstructure:"api_urls"`
+	APIKey              string        `mapstructure:"api_key"`
+	USDTContract        string        `mapstructure:"usdt_contract"`
+	USDTDecimals        int32         `mapstructure:"usdt_decimals"`
+	Confirmations       int           `mapstructure:"confirmations"`
+	BatchSize           int           `mapstructure:"batch_size"`
+	MaxConcurrentBlocks int           `mapstructure:"max_concurrent_blocks"`
+	RPCTimeout          time.Duration `mapstructure:"rpc_timeout"`
+	RetryAttempts       int           `mapstructure:"retry_attempts"`
+	RetryDelay          time.Duration `mapstructure:"retry_delay"`
+	RequeueDelay        time.Duration `mapstructure:"requeue_delay"`
+	RequestsPerSecond   int           `mapstructure:"requests_per_second"`
+	RequestsBurst       int           `mapstructure:"requests_burst"`
+	UseSolidity         bool          `mapstructure:"use_solidity"`
+	IsActive            bool          `mapstructure:"is_active"`
+}
+
 type MonitoringConfig struct {
 	ScanWindow          int           `mapstructure:"scan_window"`
 	PollInterval        time.Duration `mapstructure:"poll_interval"`
@@ -129,26 +151,26 @@ func setDefaults() {
 	viper.SetDefault("server.write_timeout", "30s")
 
 	viper.SetDefault("redis.url", "redis://localhost:6379")
-	viper.SetDefault("redis.pool_size", 20)      // Reduced for lower memory usage
-	viper.SetDefault("redis.min_idle_conns", 5)  // Reduced for lower memory usage
+	viper.SetDefault("redis.pool_size", 20)     // Reduced for lower memory usage
+	viper.SetDefault("redis.min_idle_conns", 5) // Reduced for lower memory usage
 
 	viper.SetDefault("rabbitmq.exchange", "blockchain.events")
 	viper.SetDefault("rabbitmq.queue_prefix", "bloop")
 	viper.SetDefault("rabbitmq.prefetch_count", 100)
 
 	viper.SetDefault("ethereum.confirmations", 5)
-	viper.SetDefault("ethereum.batch_size", 25)              // Reduced from 50 for lower memory
-	viper.SetDefault("ethereum.max_concurrent_blocks", 5)    // Keep at 5 for memory efficiency
+	viper.SetDefault("ethereum.batch_size", 25)           // Reduced from 50 for lower memory
+	viper.SetDefault("ethereum.max_concurrent_blocks", 5) // Keep at 5 for memory efficiency
 	viper.SetDefault("ethereum.rpc_timeout", "30s")
 	viper.SetDefault("ethereum.retry_attempts", 3)
 	viper.SetDefault("ethereum.retry_delay", "2s")
-	viper.SetDefault("ethereum.block_fetch_mode", "light")   // Light mode uses less memory
-	viper.SetDefault("ethereum.tx_fetch_concurrency", 10)    // Reduced from 20
+	viper.SetDefault("ethereum.block_fetch_mode", "light") // Light mode uses less memory
+	viper.SetDefault("ethereum.tx_fetch_concurrency", 10)  // Reduced from 20
 	viper.SetDefault("ethereum.omini_requests_per_second", 5)
 	viper.SetDefault("ethereum.omini_requests_burst", 10)
 
 	viper.SetDefault("bitcoin.confirmations", 1)
-	viper.SetDefault("bitcoin.batch_size", 10)               // Reduced from 20
+	viper.SetDefault("bitcoin.batch_size", 10) // Reduced from 20
 	viper.SetDefault("bitcoin.max_concurrent_blocks", 5)
 	viper.SetDefault("bitcoin.rpc_timeout", "30s")
 	viper.SetDefault("bitcoin.retry_attempts", 3)
@@ -159,6 +181,21 @@ func setDefaults() {
 	viper.SetDefault("bitcoin.requests_burst", 10)
 	viper.SetDefault("bitcoin.ws_url", "")
 	viper.SetDefault("bitcoin.api_url", "")
+
+	viper.SetDefault("tron.api_url", "https://api.trongrid.io")
+	viper.SetDefault("tron.usdt_contract", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t")
+	viper.SetDefault("tron.usdt_decimals", 6)
+	viper.SetDefault("tron.confirmations", 1)
+	viper.SetDefault("tron.batch_size", 25)
+	viper.SetDefault("tron.max_concurrent_blocks", 5)
+	viper.SetDefault("tron.rpc_timeout", "30s")
+	viper.SetDefault("tron.retry_attempts", 3)
+	viper.SetDefault("tron.retry_delay", "2s")
+	viper.SetDefault("tron.requeue_delay", "5s")
+	viper.SetDefault("tron.requests_per_second", 5)
+	viper.SetDefault("tron.requests_burst", 10)
+	viper.SetDefault("tron.use_solidity", true)
+	viper.SetDefault("tron.is_active", false)
 
 	viper.SetDefault("monitoring.scan_window", 1000)
 	viper.SetDefault("monitoring.poll_interval", "15s")
@@ -194,6 +231,19 @@ func overrideWithEnv() {
 	}
 	if btcAPI := os.Getenv("BTC_API_URL"); btcAPI != "" {
 		viper.Set("bitcoin.api_url", btcAPI)
+	}
+	if tronURLs := os.Getenv("TRON_API_URLS"); tronURLs != "" {
+		viper.Set("tron.api_urls", strings.Split(tronURLs, ","))
+	}
+	if tronURL := os.Getenv("TRON_API_URL"); tronURL != "" {
+		viper.Set("tron.api_url", tronURL)
+		viper.Set("tron.api_urls", []string{tronURL})
+	}
+	if tronAPIKey := os.Getenv("TRON_API_KEY"); tronAPIKey != "" {
+		viper.Set("tron.api_key", tronAPIKey)
+	}
+	if tronUSDT := os.Getenv("TRON_USDT_CONTRACT_ADDRESS"); tronUSDT != "" {
+		viper.Set("tron.usdt_contract", tronUSDT)
 	}
 	if btcUser := os.Getenv("BTC_RPC_USER"); btcUser != "" {
 		viper.Set("bitcoin.username", btcUser)

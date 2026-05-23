@@ -51,7 +51,7 @@ func NewRedisStorage(cfg *config.RedisConfig, logger *logrus.Logger) (*RedisStor
 	}
 
 	// Seed bloom filters from current Redis state (best-effort)
-	networks := []types.BlockchainType{types.Ethereum, types.BSC, types.Bitcoin}
+	networks := []types.BlockchainType{types.Ethereum, types.BSC, types.Bitcoin, types.Tron}
 	if err := rs.bloom.SeedAll(ctx, networks, rs.GetWatchedWallets); err != nil {
 		logger.Warnf("Failed to initialize Bloom filters: %v", err)
 	}

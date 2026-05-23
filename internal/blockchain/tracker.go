@@ -3,12 +3,12 @@ package blockchain
 import (
 	"context"
 	"fmt"
-
 	"time"
 
 	"github.com/igwedaniel/bloop/internal/blockchain/base"
 	"github.com/igwedaniel/bloop/internal/blockchain/bitcoin"
 	"github.com/igwedaniel/bloop/internal/blockchain/ethereum"
+	"github.com/igwedaniel/bloop/internal/blockchain/tron"
 	"github.com/igwedaniel/bloop/internal/config"
 	"github.com/igwedaniel/bloop/internal/messaging"
 	"github.com/igwedaniel/bloop/internal/storage"
@@ -111,6 +111,16 @@ func (tm *TrackerManager) StartTracker(ctx context.Context, network types.Blockc
 		bproc.SetBaseTracker(bbt)
 		tracker = bbt
 
+	case types.Tron:
+		tproc, perr := tron.NewProcessor(&tm.cfg.Tron, tm.storage, tm.logger)
+		if perr != nil {
+			return fmt.Errorf("failed to create TRON processor: %w", perr)
+		}
+		tcfg := buildBaseCfg(tm.cfg.Tron.Confirmations, tm.cfg.Tron.BatchSize, tm.cfg.Tron.MaxConcurrentBlocks, tm.cfg.Tron.RequeueDelay)
+		tbt := base.NewBaseTracker(tproc, tm.storage, tm.publisher, tm.logger, tcfg)
+		tproc.SetBaseTracker(tbt)
+		tracker = tbt
+
 	default:
 		return fmt.Errorf("unsupported blockchain network: %s", network)
 	}
@@ -182,6 +192,14 @@ func (tm *TrackerManager) AddWatchedWallet(ctx context.Context, network types.Bl
 		return fmt.Errorf("no tracker found for %s", network)
 	}
 
+	if network == types.Tron {
+		normalized, err := tron.NormalizeAddress(address)
+		if err != nil {
+			return fmt.Errorf("invalid TRON address: %w", err)
+		}
+		address = normalized
+	}
+
 	return tracker.AddWatchedWallet(ctx, address, walletID)
 }
 
@@ -191,12 +209,20 @@ func (tm *TrackerManager) RemoveWatchedWallet(ctx context.Context, network types
 		return fmt.Errorf("no tracker found for %s", network)
 	}
 
+	if network == types.Tron {
+		normalized, err := tron.NormalizeAddress(address)
+		if err != nil {
+			return fmt.Errorf("invalid TRON address: %w", err)
+		}
+		address = normalized
+	}
+
 	return tracker.RemoveWatchedWallet(ctx, address)
 }
 
 func (tm *TrackerManager) IsSupported(network types.BlockchainType) bool {
 	switch network {
-	case types.Ethereum, types.BSC, types.Bitcoin:
+	case types.Ethereum, types.BSC, types.Bitcoin, types.Tron:
 		return true
 	default:
 		return false
@@ -204,5 +230,5 @@ func (tm *TrackerManager) IsSupported(network types.BlockchainType) bool {
 }
 
 func (tm *TrackerManager) GetSupportedNetworks() []types.BlockchainType {
-	return []types.BlockchainType{types.Ethereum, types.BSC, types.Bitcoin}
+	return []types.BlockchainType{types.Ethereum, types.BSC, types.Bitcoin, types.Tron}
 }

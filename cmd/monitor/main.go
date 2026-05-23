@@ -78,6 +78,13 @@ func main() {
 		logger.Info("Bitcoin tracker started")
 	}
 
+	if cfg.Tron.IsActive {
+		if err := trackerManager.StartTracker(ctx, types.Tron); err != nil {
+			logger.Errorf("Failed to start TRON tracker: %v", err)
+		}
+		logger.Info("TRON tracker started")
+	}
+
 	// Start HTTP API server
 	apiServer := api.NewServer(&cfg.Server, trackerManager, storage, logger)
 	go func() {
