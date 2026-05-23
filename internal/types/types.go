@@ -14,6 +14,7 @@ const (
 	Ethereum BlockchainType = "ETH"
 	Bitcoin  BlockchainType = "BTC"
 	BSC      BlockchainType = "BSC"
+	Tron     BlockchainType = "TRON"
 )
 
 // Currency represents different cryptocurrencies
@@ -22,6 +23,7 @@ type Currency string
 const (
 	ETH  Currency = "ETH"
 	BTC  Currency = "BTC"
+	TRX  Currency = "TRX"
 	USDT Currency = "USDT"
 )
 

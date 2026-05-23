@@ -76,6 +76,28 @@ bitcoin:
   retry_attempts: 3
   retry_delay: 2s
 
+tron:
+  api_url: "https://api.trongrid.io"
+  api_urls:
+    - "https://api.trongrid.io"
+  # Set TRON_API_KEY in env for TronGrid production usage; do not commit secrets.
+  api_key: ""
+  # Mainnet TRC20 USDT contract. Use a test token contract on Nile/Shasta.
+  usdt_contract: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+  usdt_decimals: 6
+  # use_solidity=true reads already-solidified blocks; raise this if using full-node /wallet APIs.
+  confirmations: 1
+  batch_size: 25
+  max_concurrent_blocks: 5
+  requeue_delay: 5s
+  requests_per_second: 5
+  requests_burst: 10
+  rpc_timeout: 30s
+  retry_attempts: 3
+  retry_delay: 2s
+  use_solidity: true
+  is_active: false
+
 bsc:
   rpc_urls:
     - "https://bsc-testnet.public.blastapi.io"
