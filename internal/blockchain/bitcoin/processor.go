@@ -386,5 +386,11 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 			}
 		}
 	}
+
+	// Match Ethereum tracker behavior: count all transactions scanned in a fully processed block.
+	if bp.baseTracker != nil {
+		bp.baseTracker.IncrementTxCount(uint64(len(block.Tx)))
+	}
+
 	return true, nil
 }
