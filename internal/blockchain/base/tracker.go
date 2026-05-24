@@ -330,11 +330,33 @@ func (bt *BaseTracker) normalizeLastProcessed(ctx context.Context, currentBlock 
 		return 0
 	}
 
+	var safeHead uint64
+	if currentBlock > uint64(bt.config.Confirmations) {
+		safeHead = currentBlock - uint64(bt.config.Confirmations)
+	}
+
+	// Invariant: lastProcessed should never be ahead of safe head.
+	// If this happens (e.g. out-of-order writes/manual drift), clamp it so polling can recover gaps.
+	if safeHead > 0 && lastProcessed > safeHead {
+		resetTo := safeHead
+		bt.logger.WithFields(logrus.Fields{
+			"network":        network,
+			"last_processed": lastProcessed,
+			"current_block":  currentBlock,
+			"safe_head":      safeHead,
+			"reset_to":       resetTo,
+		}).Warn("Last processed exceeds safe head; resetting")
+
+		if err := bt.storage.ForceSetLastProcessedBlock(ctx, network, resetTo); err != nil {
+			bt.logger.Errorf("Failed to reset last processed block: %v", err)
+			return lastProcessed
+		}
+		return resetTo
+	}
+
+	// Fallback safety for obviously invalid values.
 	if lastProcessed > currentBlock {
 		resetTo := currentBlock
-		if currentBlock > uint64(bt.config.Confirmations) {
-			resetTo = currentBlock - uint64(bt.config.Confirmations)
-		}
 		bt.logger.WithFields(logrus.Fields{
 			"network":        network,
 			"last_processed": lastProcessed,
@@ -532,20 +554,13 @@ func (bt *BaseTracker) processBlockSafely(ctx context.Context, blockNumber uint6
 			return fmt.Errorf("failed to mark block as processed: %w", err)
 		}
 
-		// Update last processed block
-		if err := bt.storage.SetLastProcessedBlock(ctx, network, blockNumber); err != nil {
-			bt.logger.Errorf("Failed to update last processed block: %v", err)
-		}
-
 		// Best-effort: drop cached block now that we're done (avoid cache growth)
 		_ = bt.storage.DeleteCache(ctx, fmt.Sprintf("%s:block:%d", network, blockNumber))
 
-		next := blockNumber + 1
-		safeMax := currentBlock - uint64(bt.config.Confirmations)
-		if next <= safeMax {
-			if err := bt.storage.AdvanceHighWaterMark(ctx, network); err != nil {
-				bt.logger.Errorf("Failed to advance high-water mark: %v", err)
-			}
+		// Advance high-water mark only via contiguous processed bits.
+		// This prevents out-of-order block completion from skipping unprocessed heights.
+		if err := bt.storage.AdvanceHighWaterMark(ctx, network); err != nil {
+			bt.logger.Errorf("Failed to advance high-water mark: %v", err)
 		}
 
 		// Update metrics
