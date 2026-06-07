@@ -9,6 +9,7 @@ import (
 	"github.com/igwedaniel/bloop/internal/blockchain/base"
 	"github.com/igwedaniel/bloop/internal/blockchain/bitcoin"
 	"github.com/igwedaniel/bloop/internal/blockchain/ethereum"
+	"github.com/igwedaniel/bloop/internal/blockchain/solana"
 	"github.com/igwedaniel/bloop/internal/blockchain/tron"
 	"github.com/igwedaniel/bloop/internal/config"
 	"github.com/igwedaniel/bloop/internal/messaging"
@@ -125,6 +126,16 @@ func (tm *TrackerManager) StartTracker(ctx context.Context, network types.Blockc
 			tbt := base.NewBaseTracker(tproc, tm.storage, tm.publisher, tm.logger, tcfg)
 			tproc.SetBaseTracker(tbt)
 			tracker = tbt
+
+		case types.Solana:
+			sproc, perr := solana.NewProcessor(&tm.cfg.Solana, tm.storage, tm.logger)
+			if perr != nil {
+				return fmt.Errorf("failed to create SOLANA processor: %w", perr)
+			}
+			scfg := buildBaseCfg(tm.cfg.Solana.Confirmations, tm.cfg.Solana.BatchSize, tm.cfg.Solana.MaxConcurrentBlocks, tm.cfg.Solana.RequeueDelay)
+			sbt := base.NewBaseTracker(sproc, tm.storage, tm.publisher, tm.logger, scfg)
+			sproc.SetBaseTracker(sbt)
+			tracker = sbt
 
 		default:
 			return fmt.Errorf("unsupported blockchain network: %s", network)
@@ -245,7 +256,7 @@ func (tm *TrackerManager) IsSupported(network types.BlockchainType) bool {
 	}
 
 	switch network {
-	case types.Tron:
+	case types.Tron, types.Solana:
 		return true
 	default:
 		return false
@@ -253,7 +264,7 @@ func (tm *TrackerManager) IsSupported(network types.BlockchainType) bool {
 }
 
 func (tm *TrackerManager) GetSupportedNetworks() []types.BlockchainType {
-	networks := []types.BlockchainType{types.Tron}
+	networks := []types.BlockchainType{types.Tron, types.Solana}
 	for _, chain := range tm.cfg.EVM {
 		networks = append(networks, chain.Network)
 	}

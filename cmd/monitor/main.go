@@ -84,6 +84,13 @@ func main() {
 		logger.Info("TRON tracker started")
 	}
 
+	if cfg.Solana.IsActive {
+		if err := trackerManager.StartTracker(ctx, types.Solana); err != nil {
+			logger.Errorf("Failed to start SOLANA tracker: %v", err)
+		}
+		logger.Info("SOLANA tracker started")
+	}
+
 	// Start HTTP API server
 	apiServer := api.NewServer(&cfg.Server, trackerManager, storage, logger)
 	go func() {

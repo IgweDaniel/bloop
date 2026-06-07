@@ -18,6 +18,7 @@ type Config struct {
 	EVM        []EVMConfig      `mapstructure:"evm"`
 	UTXO       []UTXOConfig     `mapstructure:"utxo"`
 	Tron       TronConfig       `mapstructure:"tron"`
+	Solana     SolanaConfig     `mapstructure:"solana"`
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
 }
@@ -111,6 +112,25 @@ type TronConfig struct {
 	IsActive            bool          `mapstructure:"is_active"`
 }
 
+// SolanaConfig contains Solana-specific configuration.
+type SolanaConfig struct {
+	RPCURL              string         `mapstructure:"rpc_url"`
+	RPCURLs             []string       `mapstructure:"rpc_urls"`
+	WSURL               string         `mapstructure:"ws_url"`
+	NativeCurrency      types.Currency `mapstructure:"native_currency"`
+	Tokens              []TokenConfig  `mapstructure:"tokens"`
+	Confirmations       int            `mapstructure:"confirmations"`
+	BatchSize           int            `mapstructure:"batch_size"`
+	MaxConcurrentBlocks int            `mapstructure:"max_concurrent_blocks"`
+	RPCTimeout          time.Duration  `mapstructure:"rpc_timeout"`
+	RetryAttempts       int            `mapstructure:"retry_attempts"`
+	RetryDelay          time.Duration  `mapstructure:"retry_delay"`
+	RequeueDelay        time.Duration  `mapstructure:"requeue_delay"`
+	RequestsPerSecond   int            `mapstructure:"requests_per_second"`
+	RequestsBurst       int            `mapstructure:"requests_burst"`
+	IsActive            bool           `mapstructure:"is_active"`
+}
+
 type MonitoringConfig struct {
 	ScanWindow          int           `mapstructure:"scan_window"`
 	PollInterval        time.Duration `mapstructure:"poll_interval"`
@@ -185,6 +205,19 @@ func setDefaults() {
 	viper.SetDefault("tron.use_solidity", true)
 	viper.SetDefault("tron.is_active", false)
 
+	viper.SetDefault("solana.rpc_url", "https://api.mainnet-beta.solana.com")
+	viper.SetDefault("solana.native_currency", "SOL")
+	viper.SetDefault("solana.confirmations", 32)
+	viper.SetDefault("solana.batch_size", 25)
+	viper.SetDefault("solana.max_concurrent_blocks", 5)
+	viper.SetDefault("solana.rpc_timeout", "30s")
+	viper.SetDefault("solana.retry_attempts", 3)
+	viper.SetDefault("solana.retry_delay", "2s")
+	viper.SetDefault("solana.requeue_delay", "5s")
+	viper.SetDefault("solana.requests_per_second", 5)
+	viper.SetDefault("solana.requests_burst", 10)
+	viper.SetDefault("solana.is_active", false)
+
 	viper.SetDefault("monitoring.scan_window", 1000)
 	viper.SetDefault("monitoring.poll_interval", "15s")
 	viper.SetDefault("monitoring.ws_retry_interval", "30s")
@@ -212,13 +245,20 @@ func overrideWithEnv() {
 	if tronAPIKey := os.Getenv("TRON_API_KEY"); tronAPIKey != "" {
 		viper.Set("tron.api_key", tronAPIKey)
 	}
+	if solanaURLs := os.Getenv("SOLANA_RPC_URLS"); solanaURLs != "" {
+		viper.Set("solana.rpc_urls", strings.Split(solanaURLs, ","))
+	}
+	if solanaURL := os.Getenv("SOLANA_RPC_URL"); solanaURL != "" {
+		viper.Set("solana.rpc_url", solanaURL)
+		viper.Set("solana.rpc_urls", []string{solanaURL})
+	}
 	if logLevel := os.Getenv("LOG_LEVEL"); logLevel != "" {
 		viper.Set("logging.level", logLevel)
 	}
 }
 
 func (c *Config) ConfiguredNetworks() []types.BlockchainType {
-	networks := []types.BlockchainType{types.Tron}
+	networks := []types.BlockchainType{types.Tron, types.Solana}
 	for _, chain := range c.EVM {
 		networks = append(networks, chain.Network)
 	}
@@ -235,6 +275,7 @@ func normalizeConfig(cfg *Config) {
 	for i := range cfg.UTXO {
 		normalizeUTXOConfig(&cfg.UTXO[i])
 	}
+	normalizeSolanaConfig(&cfg.Solana)
 }
 
 func normalizeEVMConfig(cfg *EVMConfig) {
@@ -316,6 +357,47 @@ func normalizeUTXOConfig(cfg *UTXOConfig) {
 	}
 }
 
+func normalizeSolanaConfig(cfg *SolanaConfig) {
+	cfg.NativeCurrency = types.Currency(strings.ToUpper(strings.TrimSpace(string(cfg.NativeCurrency))))
+	cfg.RPCURL = strings.TrimSpace(cfg.RPCURL)
+	cfg.RPCURLs = compactStrings(cfg.RPCURLs)
+	cfg.WSURL = strings.TrimSpace(cfg.WSURL)
+
+	if cfg.NativeCurrency == "" {
+		cfg.NativeCurrency = types.SOL
+	}
+	if cfg.RPCURL != "" && len(cfg.RPCURLs) == 0 {
+		cfg.RPCURLs = []string{cfg.RPCURL}
+	}
+	if cfg.Confirmations == 0 {
+		cfg.Confirmations = 32
+	}
+	if cfg.BatchSize == 0 {
+		cfg.BatchSize = 25
+	}
+	if cfg.MaxConcurrentBlocks == 0 {
+		cfg.MaxConcurrentBlocks = 5
+	}
+	if cfg.RPCTimeout == 0 {
+		cfg.RPCTimeout = 30 * time.Second
+	}
+	if cfg.RetryAttempts == 0 {
+		cfg.RetryAttempts = 3
+	}
+	if cfg.RetryDelay == 0 {
+		cfg.RetryDelay = 2 * time.Second
+	}
+	if cfg.RequeueDelay == 0 {
+		cfg.RequeueDelay = 5 * time.Second
+	}
+	if cfg.RequestsPerSecond == 0 {
+		cfg.RequestsPerSecond = 5
+	}
+	if cfg.RequestsBurst == 0 {
+		cfg.RequestsBurst = 10
+	}
+}
+
 func validateConfig(cfg *Config) error {
 	seenEVM := make(map[types.BlockchainType]struct{}, len(cfg.EVM))
 	for i := range cfg.EVM {
@@ -369,6 +451,24 @@ func validateConfig(cfg *Config) error {
 		}
 		if chain.IsActive && len(chain.APIURLs) == 0 && chain.APIURL == "" {
 			return fmt.Errorf("utxo[%d] (%s) requires at least one api_url when active", i, chain.Network)
+		}
+	}
+
+	if cfg.Solana.IsActive && len(cfg.Solana.RPCURLs) == 0 && cfg.Solana.RPCURL == "" {
+		return fmt.Errorf("solana requires at least one rpc_url when active")
+	}
+	if cfg.Solana.NativeCurrency == "" {
+		return fmt.Errorf("solana.native_currency is required")
+	}
+	for i, token := range cfg.Solana.Tokens {
+		if strings.TrimSpace(token.Currency) == "" {
+			return fmt.Errorf("solana token[%d].currency is required", i)
+		}
+		if strings.TrimSpace(token.Contract) == "" {
+			return fmt.Errorf("solana token[%d].contract is required", i)
+		}
+		if token.Decimals < 0 {
+			return fmt.Errorf("solana token[%d].decimals cannot be negative", i)
 		}
 	}
 

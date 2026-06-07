@@ -16,6 +16,7 @@ const (
 	BSC      BlockchainType = "BSC"
 	Litecoin BlockchainType = "LTC"
 	Polygon  BlockchainType = "POLYGON"
+	Solana   BlockchainType = "SOLANA"
 	Tron     BlockchainType = "TRON"
 )
 
@@ -28,6 +29,7 @@ const (
 	BNB   Currency = "BNB"
 	LTC   Currency = "LTC"
 	MATIC Currency = "MATIC"
+	SOL   Currency = "SOL"
 	TRX   Currency = "TRX"
 	USDT  Currency = "USDT"
 	USDC  Currency = "USDC"
