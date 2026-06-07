@@ -35,7 +35,7 @@ func main() {
 	defer cancel()
 
 	// Initialize storage
-	storage, err := storage.NewRedisStorage(&cfg.Redis, logger)
+	storage, err := storage.NewRedisStorage(&cfg.Redis, logger, cfg.ConfiguredNetworks())
 	if err != nil {
 		logger.Fatalf("Failed to initialize storage: %v", err)
 	}
@@ -56,26 +56,25 @@ func main() {
 	logger.Info("Messaging system initialized")
 
 	trackerManager := blockchain.NewTrackerManager(cfg, storage, publisher, logger)
-	if cfg.Ethereum.IsActive {
-		if err := trackerManager.StartTracker(ctx, types.Ethereum); err != nil {
-			logger.Fatalf("Failed to start Ethereum tracker: %v", err)
+	for _, chain := range cfg.EVM {
+		if !chain.IsActive {
+			continue
 		}
-		logger.Info("Ethereum tracker started")
-
+		if err := trackerManager.StartTracker(ctx, chain.Network); err != nil {
+			logger.Fatalf("Failed to start %s tracker: %v", chain.Network, err)
+		}
+		logger.Infof("%s tracker started", chain.Network)
 	}
 
-	if cfg.Bsc.IsActive {
-		if err := trackerManager.StartTracker(ctx, types.BSC); err != nil {
-			logger.Fatalf("Failed to start BSC tracker: %v", err)
+	for _, chain := range cfg.UTXO {
+		if !chain.IsActive {
+			continue
 		}
-		logger.Info("BSC tracker started")
-	}
-
-	if cfg.Bitcoin.IsActive {
-		if err := trackerManager.StartTracker(ctx, types.Bitcoin); err != nil {
-			logger.Errorf("Failed to start Bitcoin tracker: %v", err)
+		if err := trackerManager.StartTracker(ctx, chain.Network); err != nil {
+			logger.Errorf("Failed to start %s tracker: %v", chain.Network, err)
+			continue
 		}
-		logger.Info("Bitcoin tracker started")
+		logger.Infof("%s tracker started", chain.Network)
 	}
 
 	if cfg.Tron.IsActive {

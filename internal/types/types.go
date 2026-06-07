@@ -14,6 +14,8 @@ const (
 	Ethereum BlockchainType = "ETH"
 	Bitcoin  BlockchainType = "BTC"
 	BSC      BlockchainType = "BSC"
+	Litecoin BlockchainType = "LTC"
+	Polygon  BlockchainType = "POLYGON"
 	Tron     BlockchainType = "TRON"
 )
 
@@ -21,10 +23,14 @@ const (
 type Currency string
 
 const (
-	ETH  Currency = "ETH"
-	BTC  Currency = "BTC"
-	TRX  Currency = "TRX"
-	USDT Currency = "USDT"
+	ETH   Currency = "ETH"
+	BTC   Currency = "BTC"
+	BNB   Currency = "BNB"
+	LTC   Currency = "LTC"
+	MATIC Currency = "MATIC"
+	TRX   Currency = "TRX"
+	USDT  Currency = "USDT"
+	USDC  Currency = "USDC"
 )
 
 // TransactionStatus represents the status of a transaction

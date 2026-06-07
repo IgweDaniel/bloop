@@ -17,36 +17,90 @@ rabbitmq:
   queue_prefix: "bloop"
   prefetch_count: 100
 
-ethereum:
-  rpc_urls:
-    - "https://ethereum-sepolia-rpc.publicnode.com"
-    - "https://eth-sepolia.public.blastapi.io"
-  ws_url: "wss://ethereum-sepolia-rpc.publicnode.com"
-  # Optional: Multiple omini RPC URLs with extended features for fetching full blocks with transactions.
-  # e.g., Alchemy, Infura, or any provider that reliably returns full blocks. Rotation is supported.
-  # Do not commit secrets here.
-  omini_rpc_urls:
-    - ""
-  # Deprecated: use omini_rpc_urls instead
-  # omini_rpc_url: ""
-  # Rate limiting for omini clients - adjust based on your provider's limits
-  # For example: Alchemy free tier is 300 req/sec, paid tiers vary
-  omini_requests_per_second: 5
-  omini_requests_burst: 10
-  usdt_contract: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
-  usdt_decimals: 6
-  confirmations: 5
-  batch_size: 50
-  max_concurrent_blocks: 5
-  # Block fetch mode: "light" uses GetBlockVerbose (fetches each tx individually with RPC rotation)
-  # "full" fetches entire block with all transactions in one call (more expensive for quoted RPCs)
-  block_fetch_mode: light
-  tx_fetch_concurrency: 20
-  rpc_timeout: 30s
-  retry_attempts: 3
-  retry_delay: 2s
-  skip_native: false
-  is_active: true
+evm:
+  - network: "ETH"
+    native_currency: "ETH"
+    rpc_urls:
+      - "https://ethereum-sepolia-rpc.publicnode.com"
+      - "https://eth-sepolia.public.blastapi.io"
+    ws_url: "wss://ethereum-sepolia-rpc.publicnode.com"
+    # Optional fallback RPCs if regular providers fail full block fetches.
+    # Do not commit secrets here.
+    omini_rpc_urls: []
+    # Rate limiting for fallback omini clients - adjust based on your provider's limits
+    omini_requests_per_second: 5
+    omini_requests_burst: 10
+    tokens:
+      - currency: "USDT"
+        contract: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+        decimals: 6
+      # - currency: "USDC"
+      #   contract: "<sepolia-usdc-contract>"
+      #   decimals: 6
+    confirmations: 5
+    batch_size: 50
+    max_concurrent_blocks: 5
+    # Block fetch mode: "full" uses eth_getBlockByNumber(..., true) on regular RPCs.
+    # "light" fetches tx hashes first, then each tx individually with RPC rotation.
+    block_fetch_mode: full
+    tx_fetch_concurrency: 20
+    rpc_timeout: 30s
+    retry_attempts: 3
+    retry_delay: 2s
+    skip_native: false
+    is_active: true
+
+  - network: "BSC"
+    native_currency: "BNB"
+    rpc_urls:
+      - "https://bsc-testnet.public.blastapi.io"
+      - "https://bsc-testnet-rpc.publicnode.com"
+    ws_url: "wss://bsc-testnet-rpc.publicnode.com"
+    # Optional fallback RPCs if regular providers fail full block fetches.
+    omini_rpc_urls: []
+    # Rate limiting for fallback omini clients
+    omini_requests_per_second: 5
+    omini_requests_burst: 10
+    tokens:
+      - currency: "USDT"
+        contract: "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd"
+        decimals: 18
+      # - currency: "USDC"
+      #   contract: "<bsc-testnet-usdc-contract>"
+      #   decimals: 18
+    confirmations: 5
+    batch_size: 50
+    max_concurrent_blocks: 20
+    block_fetch_mode: full
+    tx_fetch_concurrency: 20
+    rpc_timeout: 30s
+    retry_attempts: 3
+    retry_delay: 2s
+    skip_native: true
+    is_active: true
+
+  - network: "POLYGON"
+    native_currency: "MATIC"
+    rpc_urls:
+      - "https://polygon-amoy-bor-rpc.publicnode.com"
+    ws_url: "wss://polygon-amoy-bor-rpc.publicnode.com"
+    # Optional fallback RPCs if regular providers fail full block fetches.
+    omini_rpc_urls: []
+    # Rate limiting for fallback omini clients
+    omini_requests_per_second: 5
+    omini_requests_burst: 10
+    tokens: []
+    # Add Polygon token contracts here, for example USDT/USDC on Amoy or mainnet.
+    confirmations: 5
+    batch_size: 50
+    max_concurrent_blocks: 20
+    block_fetch_mode: full
+    tx_fetch_concurrency: 20
+    rpc_timeout: 30s
+    retry_attempts: 3
+    retry_delay: 2s
+    skip_native: false
+    is_active: false
 
 monitoring:
   scan_window: 1000
@@ -59,22 +113,43 @@ logging:
   level: "info"
   format: "json"
 
-bitcoin:
-  api_url: "https://mempool.space/testnet/api"
-  api_urls:
-    - "https://mempool.space/testnet/api"
-    - "https://blockstream.info/testnet/api"
-  ws_url: "wss://mempool.space/testnet/api/v1/ws"
-  confirmations: 1
-  batch_size: 10
-  max_concurrent_blocks: 5
-  tx_fetch_concurrency: 2
-  requeue_delay: 5s
-  requests_per_second: 5
-  requests_burst: 10
-  rpc_timeout: 30s
-  retry_attempts: 3
-  retry_delay: 2s
+utxo:
+  - network: "BTC"
+    native_currency: "BTC"
+    api_url: "https://mempool.space/testnet/api"
+    api_urls:
+      - "https://mempool.space/testnet/api"
+      - "https://blockstream.info/testnet/api"
+    ws_url: "wss://mempool.space/testnet/api/v1/ws"
+    confirmations: 1
+    batch_size: 10
+    max_concurrent_blocks: 5
+    tx_fetch_concurrency: 2
+    requeue_delay: 5s
+    requests_per_second: 5
+    requests_burst: 10
+    rpc_timeout: 30s
+    retry_attempts: 3
+    retry_delay: 2s
+    is_active: false
+
+  - network: "LTC"
+    native_currency: "LTC"
+    api_url: "https://litecoinspace.org/api"
+    api_urls:
+      - "https://litecoinspace.org/api"
+    ws_url: "wss://litecoinspace.org/api/v1/ws"
+    confirmations: 6
+    batch_size: 10
+    max_concurrent_blocks: 5
+    tx_fetch_concurrency: 2
+    requeue_delay: 5s
+    requests_per_second: 5
+    requests_burst: 10
+    rpc_timeout: 30s
+    retry_attempts: 3
+    retry_delay: 2s
+    is_active: false
 
 tron:
   api_url: "https://api.trongrid.io"
@@ -82,9 +157,14 @@ tron:
     - "https://api.trongrid.io"
   # Set TRON_API_KEY in env for TronGrid production usage; do not commit secrets.
   api_key: ""
-  # Mainnet TRC20 USDT contract. Use a test token contract on Nile/Shasta.
-  usdt_contract: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-  usdt_decimals: 6
+  tokens:
+    # Mainnet TRC20 USDT. Use test token contracts on Nile/Shasta.
+    - currency: "USDT"
+      contract: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+      decimals: 6
+    # - currency: "USDC"
+    #   contract: "<trc20-usdc-contract>"
+    #   decimals: 6
   # use_solidity=true reads already-solidified blocks; raise this if using full-node /wallet APIs.
   confirmations: 1
   batch_size: 25
@@ -97,27 +177,3 @@ tron:
   retry_delay: 2s
   use_solidity: true
   is_active: false
-
-bsc:
-  rpc_urls:
-    - "https://bsc-testnet.public.blastapi.io"
-    - "https://bsc-testnet-rpc.publicnode.com"
-  ws_url: "wss://bsc-testnet-rpc.publicnode.com"
-  # Multiple omini RPC URLs for rotation (premium providers with full block support)
-  omini_rpc_urls:
-    - ""
-  # Rate limiting for omini clients
-  omini_requests_per_second: 5
-  omini_requests_burst: 10
-  usdt_contract: "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd"
-  usdt_decimals: 18
-  confirmations: 5
-  batch_size: 50
-  max_concurrent_blocks: 20
-  block_fetch_mode: light
-  tx_fetch_concurrency: 20
-  rpc_timeout: 30s
-  retry_attempts: 3
-  retry_delay: 2s
-  skip_native: true
-  is_active: true

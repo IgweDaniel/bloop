@@ -39,6 +39,20 @@ type BlockProcessor interface {
 	SubscribeToNewBlocks(ctx context.Context, blockCh chan<- uint64) error
 }
 
+// BlockJob is the unit of work consumed by tracker workers.
+// Source is used for routing, logs, and metrics.
+type BlockJob struct {
+	Number uint64
+	Source string
+}
+
+const (
+	blockSourceRealtime = "realtime"
+	blockSourcePolling  = "polling"
+	blockSourceCatchup  = "catchup"
+	blockSourceRequeue  = "requeue"
+)
+
 // BaseTrackerConfig contains common configuration for all trackers
 type BaseTrackerConfig struct {
 	Confirmations       int           `json:"confirmations"`
@@ -48,6 +62,16 @@ type BaseTrackerConfig struct {
 	CatchupBatchSize    int           `json:"catchup_batch_size"`
 	HealthCheckInterval time.Duration `json:"health_check_interval"`
 	RequeueDelay        time.Duration `json:"requeue_delay"`
+
+	// Optional split-queue tuning. If these are not set, MaxConcurrentBlocks
+	// is split into realtime and catchup workers automatically.
+	RealtimeWorkers int `json:"realtime_workers"`
+	CatchupWorkers  int `json:"catchup_workers"`
+
+	// Optional queue capacities. If not set, sensible defaults are derived
+	// from the worker counts and CatchupBatchSize.
+	RealtimeQueueCap int `json:"realtime_queue_cap"`
+	CatchupQueueCap  int `json:"catchup_queue_cap"`
 }
 
 // BaseTracker provides common functionality for all blockchain trackers
@@ -58,8 +82,7 @@ type BaseTracker struct {
 	logger    *logrus.Logger
 	config    BaseTrackerConfig
 
-	blockSemaphore *semaphore.Weighted
-	rpcSemaphore   *semaphore.Weighted
+	rpcSemaphore *semaphore.Weighted
 
 	isRunning bool
 	stopCh    chan struct{}
@@ -81,7 +104,9 @@ type BaseTracker struct {
 	skippedAlreadyProcessed uint64
 	blockGapConsecutive     uint64
 
-	blockCh chan uint64
+	realtimeCh     chan BlockJob
+	catchupCh      chan BlockJob
+	inFlightBlocks map[uint64]struct{}
 }
 
 // NewBaseTracker creates a new base tracker
@@ -92,22 +117,78 @@ func NewBaseTracker(
 	logger *logrus.Logger,
 	config BaseTrackerConfig,
 ) *BaseTracker {
-	queueCap := config.MaxConcurrentBlocks * 10
-	if queueCap < 50 {
-		queueCap = 50
-	}
+	realtimeWorkers, catchupWorkers := config.workerSplit()
+	realtimeQueueCap, catchupQueueCap := config.queueCaps(realtimeWorkers, catchupWorkers)
+
 	return &BaseTracker{
 		processor:      processor,
 		storage:        storage,
 		publisher:      publisher,
 		logger:         logger,
 		config:         config,
-		blockSemaphore: semaphore.NewWeighted(int64(config.MaxConcurrentBlocks)),
 		rpcSemaphore:   semaphore.NewWeighted(20), // Reduced from 50 for lower memory usage
 		stopCh:         make(chan struct{}),
-		blockCh:        make(chan uint64, queueCap),
+		realtimeCh:     make(chan BlockJob, realtimeQueueCap),
+		catchupCh:      make(chan BlockJob, catchupQueueCap),
+		inFlightBlocks: make(map[uint64]struct{}),
 		startTime:      time.Now(),
 	}
+}
+
+func (c BaseTrackerConfig) workerSplit() (int, int) {
+	realtimeWorkers := c.RealtimeWorkers
+	catchupWorkers := c.CatchupWorkers
+
+	if realtimeWorkers > 0 || catchupWorkers > 0 {
+		if realtimeWorkers <= 0 {
+			realtimeWorkers = 1
+		}
+		if catchupWorkers <= 0 {
+			catchupWorkers = 1
+		}
+		return realtimeWorkers, catchupWorkers
+	}
+
+	total := c.MaxConcurrentBlocks
+	if total <= 0 {
+		total = 1
+	}
+
+	// Default split: protect some capacity for live/retry work while leaving
+	// most workers for catchup. For MaxConcurrentBlocks=100, this gives 20/80.
+	realtimeWorkers = total / 5
+	if realtimeWorkers < 1 {
+		realtimeWorkers = 1
+	}
+	catchupWorkers = total - realtimeWorkers
+	if catchupWorkers < 1 {
+		catchupWorkers = 1
+	}
+
+	return realtimeWorkers, catchupWorkers
+}
+
+func (c BaseTrackerConfig) queueCaps(realtimeWorkers, catchupWorkers int) (int, int) {
+	realtimeCap := c.RealtimeQueueCap
+	if realtimeCap <= 0 {
+		realtimeCap = realtimeWorkers * 20
+	}
+	if realtimeCap < 200 {
+		realtimeCap = 200
+	}
+
+	catchupCap := c.CatchupQueueCap
+	if catchupCap <= 0 {
+		catchupCap = catchupWorkers * 50
+	}
+	if c.CatchupBatchSize > catchupCap {
+		catchupCap = c.CatchupBatchSize
+	}
+	if catchupCap < 1000 {
+		catchupCap = 1000
+	}
+
+	return realtimeCap, catchupCap
 }
 
 // Start begins monitoring the blockchain
@@ -117,6 +198,14 @@ func (bt *BaseTracker) Start(ctx context.Context) error {
 		bt.mu.Unlock()
 		return fmt.Errorf("tracker for %s is already running", bt.processor.GetNetwork())
 	}
+
+	realtimeWorkers, catchupWorkers := bt.config.workerSplit()
+	realtimeQueueCap, catchupQueueCap := bt.config.queueCaps(realtimeWorkers, catchupWorkers)
+
+	bt.stopCh = make(chan struct{})
+	bt.realtimeCh = make(chan BlockJob, realtimeQueueCap)
+	bt.catchupCh = make(chan BlockJob, catchupQueueCap)
+	bt.inFlightBlocks = make(map[uint64]struct{})
 	bt.isRunning = true
 	bt.mu.Unlock()
 
@@ -126,12 +215,21 @@ func (bt *BaseTracker) Start(ctx context.Context) error {
 	// Initialize blockchain-specific providers
 	bt.runCtx, bt.runCancel = context.WithCancel(ctx)
 	if err := bt.processor.InitializeProviders(bt.runCtx); err != nil {
+		bt.mu.Lock()
 		bt.isRunning = false
+		bt.mu.Unlock()
 		return fmt.Errorf("failed to initialize providers: %w", err)
 	}
 
-	bt.wg.Add(1)
-	go bt.blockProcessorLoop(bt.runCtx)
+	for i := 0; i < realtimeWorkers; i++ {
+		bt.wg.Add(1)
+		go bt.blockWorker(bt.runCtx, i+1, blockSourceRealtime, bt.realtimeCh)
+	}
+
+	for i := 0; i < catchupWorkers; i++ {
+		bt.wg.Add(1)
+		go bt.blockWorker(bt.runCtx, i+1, blockSourceCatchup, bt.catchupCh)
+	}
 
 	bt.wg.Add(1)
 	go bt.blockSubscriptionLoop(bt.runCtx)
@@ -139,7 +237,11 @@ func (bt *BaseTracker) Start(ctx context.Context) error {
 	bt.wg.Add(1)
 	go bt.healthMonitorLoop(bt.runCtx)
 
-	go bt.performInitialCatchup(bt.runCtx)
+	bt.wg.Add(1)
+	go func() {
+		defer bt.wg.Done()
+		bt.performInitialCatchup(bt.runCtx)
+	}()
 
 	bt.logger.Infof("%s tracker started successfully", network)
 	return nil
@@ -217,16 +319,16 @@ func (bt *BaseTracker) GetStats() types.TrackerStats {
 	return types.TrackerStats{
 		Network:             bt.processor.GetNetwork(),
 		IsRunning:           bt.isRunning,
-		ProcessedBlocks:     bt.processedBlocks,
-		ProcessedTxs:        bt.processedTxs,
+		ProcessedBlocks:     atomic.LoadUint64(&bt.processedBlocks),
+		ProcessedTxs:        atomic.LoadUint64(&bt.processedTxs),
 		WatchedWallets:      len(watchedWallets),
 		LastBlockHeight:     lastBlock,
 		CurrentBlockHeight:  currentBlock,
 		SafeHead:            safeHead,
 		BlockGap:            blockGap,
 		Confirmations:       bt.config.Confirmations,
-		BlockQueueLen:       len(bt.blockCh),
-		BlockQueueCap:       cap(bt.blockCh),
+		BlockQueueLen:       len(bt.realtimeCh) + len(bt.catchupCh),
+		BlockQueueCap:       cap(bt.realtimeCh) + cap(bt.catchupCh),
 		LastEnqueuedBlock:   atomic.LoadUint64(&bt.lastEnqueued),
 		LastDequeuedBlock:   atomic.LoadUint64(&bt.lastDequeued),
 		LastProcessingBlock: atomic.LoadUint64(&bt.lastProcessing),
@@ -238,7 +340,7 @@ func (bt *BaseTracker) GetStats() types.TrackerStats {
 		APIProviderErrors:   apiProviderErrors,
 		APIProviderLast:     apiProviderLast,
 		Uptime:              time.Since(bt.startTime).String(),
-		ErrorCount:          bt.errorCount,
+		ErrorCount:          atomic.LoadUint64(&bt.errorCount),
 	}
 }
 
@@ -254,7 +356,7 @@ func (bt *BaseTracker) GetNetwork() types.BlockchainType {
 	return bt.processor.GetNetwork()
 }
 
-func (bt *BaseTracker) blockProcessorLoop(ctx context.Context) {
+func (bt *BaseTracker) blockWorker(ctx context.Context, workerID int, workerKind string, ch <-chan BlockJob) {
 	defer bt.wg.Done()
 
 	for {
@@ -263,10 +365,44 @@ func (bt *BaseTracker) blockProcessorLoop(ctx context.Context) {
 			return
 		case <-bt.stopCh:
 			return
-		case blockNumber := <-bt.blockCh:
-			atomic.StoreUint64(&bt.lastDequeued, blockNumber)
-			bt.enqueueBlock(ctx, blockNumber, "realtime")
+		case job := <-ch:
+			atomic.StoreUint64(&bt.lastDequeued, job.Number)
+			bt.processBlockJob(ctx, job, workerID, workerKind)
 		}
+	}
+}
+
+func (bt *BaseTracker) enqueueJob(ctx context.Context, job BlockJob) bool {
+	if job.Source == "" {
+		job.Source = "unknown"
+	}
+
+	ch := bt.realtimeCh
+	queueName := "realtime"
+	if job.Source == blockSourceCatchup {
+		ch = bt.catchupCh
+		queueName = "catchup"
+	}
+
+	select {
+	case ch <- job:
+		atomic.StoreUint64(&bt.lastEnqueued, job.Number)
+		return true
+	case <-ctx.Done():
+		return false
+	case <-bt.stopCh:
+		return false
+	case <-time.After(2 * time.Second):
+		bt.logger.WithFields(logrus.Fields{
+			"network":      bt.processor.GetNetwork(),
+			"block_number": job.Number,
+			"source":       job.Source,
+			"queue":        queueName,
+			"queue_len":    len(ch),
+			"queue_cap":    cap(ch),
+		}).Warn("Block queue still full, deferring block")
+		atomic.AddUint64(&bt.skippedChannelFull, 1)
+		return false
 	}
 }
 
@@ -277,17 +413,19 @@ func (bt *BaseTracker) blockSubscriptionLoop(ctx context.Context) {
 	ticker := time.NewTicker(bt.config.PollInterval)
 	defer ticker.Stop()
 
-	// Try to establish real-time subscription
+	// Keep the processor interface simple: blockchain-specific code still emits raw block numbers,
+	// while the base tracker wraps them into BlockJob values before they enter the central queue.
+	realtimeBlocks := make(chan uint64, cap(bt.realtimeCh))
+
 	subscriptionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	go func() {
-		if err := bt.processor.SubscribeToNewBlocks(subscriptionCtx, bt.blockCh); err != nil {
+		if err := bt.processor.SubscribeToNewBlocks(subscriptionCtx, realtimeBlocks); err != nil {
 			bt.logger.Warnf("Real-time subscription failed, falling back to polling: %v", err)
 		}
 	}()
 
-	// Fallback polling
 	for {
 		select {
 		case <-ctx.Done():
@@ -296,6 +434,13 @@ func (bt *BaseTracker) blockSubscriptionLoop(ctx context.Context) {
 		case <-bt.stopCh:
 			cancel()
 			return
+		case blockNumber, ok := <-realtimeBlocks:
+			if !ok {
+				bt.logger.Warn("Real-time block channel closed; polling will continue")
+				realtimeBlocks = nil
+				continue
+			}
+			bt.enqueueJob(ctx, BlockJob{Number: blockNumber, Source: blockSourceRealtime})
 		case <-ticker.C:
 			bt.performPolling(ctx)
 		}
@@ -417,6 +562,15 @@ func (bt *BaseTracker) performInitialCatchup(ctx context.Context) {
 
 		// Process in batches to avoid overwhelming the system
 		batchSize := uint64(bt.config.CatchupBatchSize)
+		if batchSize == 0 {
+			batchSize = 1
+		}
+
+		safeHead := currentBlock
+		if currentBlock > uint64(bt.config.Confirmations) {
+			safeHead = currentBlock - uint64(bt.config.Confirmations)
+		}
+
 		for start := lastProcessed + 1; start <= currentBlock; start += batchSize {
 			end := start + batchSize - 1
 			if end > currentBlock {
@@ -424,10 +578,12 @@ func (bt *BaseTracker) performInitialCatchup(ctx context.Context) {
 			}
 
 			for blockNum := start; blockNum <= end; blockNum++ {
-				if blockNum > currentBlock-uint64(bt.config.Confirmations) {
+				if blockNum > safeHead {
 					break
 				}
-				bt.enqueueBlock(ctx, blockNum, "catchup")
+				if ok := bt.enqueueJob(ctx, BlockJob{Number: blockNum, Source: blockSourceCatchup}); !ok {
+					return
+				}
 			}
 
 			// Small delay between batches
@@ -447,7 +603,7 @@ func (bt *BaseTracker) performPolling(ctx context.Context) {
 	currentBlock, err := bt.processor.GetCurrentBlockHeight(ctx)
 	if err != nil {
 		bt.logger.Errorf("Failed to get current block number: %v", err)
-		bt.errorCount++
+		atomic.AddUint64(&bt.errorCount, 1)
 		return
 	}
 
@@ -456,56 +612,93 @@ func (bt *BaseTracker) performPolling(ctx context.Context) {
 		return
 	}
 
+	safeHead := currentBlock
+	if currentBlock > uint64(bt.config.Confirmations) {
+		safeHead = currentBlock - uint64(bt.config.Confirmations)
+	}
+
 	// Process missing blocks
 	for blockNum := lastProcessed + 1; blockNum <= currentBlock; blockNum++ {
-		if blockNum > currentBlock-uint64(bt.config.Confirmations) {
+		if blockNum > safeHead {
 			break // Wait for more confirmations
 		}
 
-		select {
-		case bt.blockCh <- blockNum:
-			atomic.StoreUint64(&bt.lastEnqueued, blockNum)
-		case <-ctx.Done():
+		if ok := bt.enqueueJob(ctx, BlockJob{Number: blockNum, Source: blockSourcePolling}); !ok {
+			// Defer the rest of this polling pass; the next poll will retry from persisted progress.
 			return
-		case <-bt.stopCh:
-			return
-		default:
-			// Channel full, skip this block for now
-			bt.logger.Debugf("Block channel full, skipping block %d", blockNum)
-			atomic.AddUint64(&bt.skippedChannelFull, 1)
 		}
 	}
 }
 
-func (bt *BaseTracker) enqueueBlock(ctx context.Context, blockNumber uint64, source string) {
+func (bt *BaseTracker) processBlockJob(ctx context.Context, job BlockJob, workerID int, workerKind string) {
+	blockNumber := job.Number
+	source := job.Source
 	network := bt.processor.GetNetwork()
+
+	bt.mu.Lock()
+	if _, ok := bt.inFlightBlocks[blockNumber]; ok {
+		bt.mu.Unlock()
+		atomic.AddUint64(&bt.skippedAlreadyProcessed, 1)
+		bt.logger.WithFields(logrus.Fields{
+			"network":      network,
+			"block_number": blockNumber,
+			"source":       source,
+		}).Debug("Block already in flight, skipping duplicate enqueue")
+		return
+	}
+	bt.inFlightBlocks[blockNumber] = struct{}{}
+	bt.mu.Unlock()
+
+	releaseInFlight := func() {
+		bt.mu.Lock()
+		delete(bt.inFlightBlocks, blockNumber)
+		bt.mu.Unlock()
+	}
 
 	processed, err := bt.storage.IsBlockProcessed(ctx, network, blockNumber)
 	if err != nil {
+		releaseInFlight()
 		bt.logger.Errorf("Failed to check if block %d is processed: %v", blockNumber, err)
-		bt.errorCount++
+		atomic.AddUint64(&bt.errorCount, 1)
 		return
 	}
 	if processed {
+		releaseInFlight()
 		atomic.AddUint64(&bt.skippedAlreadyProcessed, 1)
-		return
-	}
-
-	if err := bt.blockSemaphore.Acquire(ctx, 1); err != nil {
-		bt.logger.Errorf("Failed to acquire block semaphore: %v", err)
-		return
-	}
-
-	go func() {
-		defer bt.blockSemaphore.Release(1)
-		if err := bt.processBlockSafely(ctx, blockNumber, source); err != nil {
-			if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
-				return
-			}
-			bt.logger.Errorf("Failed to process %s block %d from %s: %v", network, blockNumber, source, err)
-			bt.errorCount++
+		if err := bt.storage.AdvanceHighWaterMark(ctx, network); err != nil {
+			bt.logger.WithFields(logrus.Fields{
+				"network":      network,
+				"block_number": blockNumber,
+				"source":       source,
+				"error":        err,
+			}).Error("Failed to advance high-water mark after already-processed block")
+			atomic.AddUint64(&bt.errorCount, 1)
+			return
 		}
-	}()
+		bt.logger.WithFields(logrus.Fields{
+			"network":      network,
+			"block_number": blockNumber,
+			"source":       source,
+		}).Debug("Block already processed, advanced high-water mark")
+		return
+	}
+
+	defer releaseInFlight()
+
+	if err := bt.processBlockSafely(ctx, blockNumber, source); err != nil {
+		if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
+			return
+		}
+		bt.logger.WithFields(logrus.Fields{
+			"network":      network,
+			"block_number": blockNumber,
+			"source":       source,
+			"worker_id":    workerID,
+			"worker_kind":  workerKind,
+			"error":        err,
+		}).Error("Failed to process block")
+		atomic.AddUint64(&bt.errorCount, 1)
+	}
 }
 
 // processBlockSafely processes a block with error handling and metrics
@@ -526,19 +719,30 @@ func (bt *BaseTracker) processBlockSafely(ctx context.Context, blockNumber uint6
 		return fmt.Errorf("failed to get current block height: %w", err)
 	}
 
+	if currentBlock < blockNumber {
+		bt.logger.WithFields(logrus.Fields{
+			"network":       network,
+			"block_number":  blockNumber,
+			"current_block": currentBlock,
+			"source":        source,
+			"requeue_delay": bt.requeueDelay().String(),
+		}).Debug("Block is ahead of current tip, requeueing")
+		bt.requeueBlock(ctx, blockNumber)
+		return nil
+	}
+
 	confirmations := currentBlock - blockNumber
 	if confirmations < uint64(bt.config.Confirmations) {
-		delay := bt.config.RequeueDelay
-		if delay <= 0 {
-			delay = 5 * time.Second
-		}
-		time.AfterFunc(delay, func() {
-			select {
-			case bt.blockCh <- blockNumber:
-			default:
-				// Channel full, will be picked up by polling
-			}
-		})
+		bt.logger.WithFields(logrus.Fields{
+			"network":                network,
+			"block_number":           blockNumber,
+			"current_block":          currentBlock,
+			"confirmations":          confirmations,
+			"required_confirmations": bt.config.Confirmations,
+			"source":                 source,
+			"requeue_delay":          bt.requeueDelay().String(),
+		}).Debug("Block does not have enough confirmations, requeueing")
+		bt.requeueBlock(ctx, blockNumber)
 		return nil
 	}
 
@@ -564,7 +768,7 @@ func (bt *BaseTracker) processBlockSafely(ctx context.Context, blockNumber uint6
 		}
 
 		// Update metrics
-		bt.processedBlocks++
+		atomic.AddUint64(&bt.processedBlocks, 1)
 
 		processingTime := time.Since(startTime)
 		bt.logger.WithFields(logrus.Fields{
@@ -579,11 +783,54 @@ func (bt *BaseTracker) processBlockSafely(ctx context.Context, blockNumber uint6
 	return nil
 }
 
+func (bt *BaseTracker) requeueBlock(ctx context.Context, blockNumber uint64) {
+	delay := bt.requeueDelay()
+	time.AfterFunc(delay, func() {
+		job := BlockJob{Number: blockNumber, Source: blockSourceRequeue}
+		select {
+		case <-ctx.Done():
+			return
+		case <-bt.stopCh:
+			return
+		case bt.realtimeCh <- job:
+			atomic.StoreUint64(&bt.lastEnqueued, blockNumber)
+			bt.logger.WithFields(logrus.Fields{
+				"network":       bt.processor.GetNetwork(),
+				"block_number":  blockNumber,
+				"source":        job.Source,
+				"queue":         "realtime",
+				"requeue_delay": delay.String(),
+			}).Debug("Requeued block")
+		default:
+			bt.logger.WithFields(logrus.Fields{
+				"network":       bt.processor.GetNetwork(),
+				"block_number":  blockNumber,
+				"requeue_delay": delay.String(),
+				"queue":         "realtime",
+				"queue_len":     len(bt.realtimeCh),
+				"queue_cap":     cap(bt.realtimeCh),
+			}).Warn("Realtime queue full, requeue deferred to polling")
+		}
+	})
+}
+
+func (bt *BaseTracker) requeueDelay() time.Duration {
+	delay := bt.config.RequeueDelay
+	if delay <= 0 {
+		// Five seconds gives websocket/polling tips time to converge without creating a hot requeue loop.
+		delay = 5 * time.Second
+	}
+	return delay
+}
+
 // reportHealth logs performance metrics
 func (bt *BaseTracker) reportHealth() {
 	uptime := time.Since(bt.startTime)
-	blocksPerSecond := float64(bt.processedBlocks) / uptime.Seconds()
-	txsPerSecond := float64(bt.processedTxs) / uptime.Seconds()
+	processedBlocks := atomic.LoadUint64(&bt.processedBlocks)
+	processedTxs := atomic.LoadUint64(&bt.processedTxs)
+	errorCount := atomic.LoadUint64(&bt.errorCount)
+	blocksPerSecond := float64(processedBlocks) / uptime.Seconds()
+	txsPerSecond := float64(processedTxs) / uptime.Seconds()
 
 	var (
 		lastProcessed uint64
@@ -614,14 +861,16 @@ func (bt *BaseTracker) reportHealth() {
 	gapConsecutive := atomic.LoadUint64(&bt.blockGapConsecutive)
 	if blockGap > gapWarnThreshold && (gapConsecutive == gapWarnConsecutiveThreshold || gapConsecutive%10 == 0) {
 		bt.logger.WithFields(logrus.Fields{
-			"network":         bt.processor.GetNetwork(),
-			"block_gap":       blockGap,
-			"gap_threshold":   gapWarnThreshold,
-			"gap_consecutive": gapConsecutive,
-			"last_processed":  lastProcessed,
-			"safe_head":       safeHead,
-			"queue_len":       len(bt.blockCh),
-			"queue_cap":       cap(bt.blockCh),
+			"network":            bt.processor.GetNetwork(),
+			"block_gap":          blockGap,
+			"gap_threshold":      gapWarnThreshold,
+			"gap_consecutive":    gapConsecutive,
+			"last_processed":     lastProcessed,
+			"safe_head":          safeHead,
+			"realtime_queue_len": len(bt.realtimeCh),
+			"realtime_queue_cap": cap(bt.realtimeCh),
+			"catchup_queue_len":  len(bt.catchupCh),
+			"catchup_queue_cap":  cap(bt.catchupCh),
 		}).Warn("Block gap remains high")
 	}
 
@@ -631,11 +880,11 @@ func (bt *BaseTracker) reportHealth() {
 		CurrentBlockHeight: currentBlock,
 		SafeHead:           safeHead,
 		LastProcessedBlock: lastProcessed,
-		BlockQueueLen:      len(bt.blockCh),
-		BlockQueueCap:      cap(bt.blockCh),
-		ProcessedBlocks:    bt.processedBlocks,
-		ProcessedTxs:       bt.processedTxs,
-		ErrorCount:         bt.errorCount,
+		BlockQueueLen:      len(bt.realtimeCh) + len(bt.catchupCh),
+		BlockQueueCap:      cap(bt.realtimeCh) + cap(bt.catchupCh),
+		ProcessedBlocks:    processedBlocks,
+		ProcessedTxs:       processedTxs,
+		ErrorCount:         errorCount,
 		SkippedChannelFull: atomic.LoadUint64(&bt.skippedChannelFull),
 		SkippedProcessed:   atomic.LoadUint64(&bt.skippedAlreadyProcessed),
 		BlocksPerSecond:    blocksPerSecond,
@@ -646,9 +895,9 @@ func (bt *BaseTracker) reportHealth() {
 	bt.logger.WithFields(logrus.Fields{
 		"network":               bt.processor.GetNetwork(),
 		"uptime":                uptime,
-		"processed_blocks":      bt.processedBlocks,
-		"processed_txs":         bt.processedTxs,
-		"error_count":           bt.errorCount,
+		"processed_blocks":      processedBlocks,
+		"processed_txs":         processedTxs,
+		"error_count":           errorCount,
 		"blocks_per_second":     blocksPerSecond,
 		"txs_per_second":        txsPerSecond,
 		"last_block_height":     lastProcessed,
@@ -656,14 +905,18 @@ func (bt *BaseTracker) reportHealth() {
 		"safe_head":             safeHead,
 		"block_gap":             blockGap,
 		"confirmations":         bt.config.Confirmations,
-		"block_queue_len":       len(bt.blockCh),
-		"block_queue_cap":       cap(bt.blockCh),
+		"block_queue_len":       len(bt.realtimeCh) + len(bt.catchupCh),
+		"block_queue_cap":       cap(bt.realtimeCh) + cap(bt.catchupCh),
+		"realtime_queue_len":    len(bt.realtimeCh),
+		"realtime_queue_cap":    cap(bt.realtimeCh),
+		"catchup_queue_len":     len(bt.catchupCh),
+		"catchup_queue_cap":     cap(bt.catchupCh),
 		"last_enqueued_block":   atomic.LoadUint64(&bt.lastEnqueued),
 		"last_dequeued_block":   atomic.LoadUint64(&bt.lastDequeued),
 		"last_processing_block": atomic.LoadUint64(&bt.lastProcessing),
 		"skipped_channel_full":  atomic.LoadUint64(&bt.skippedChannelFull),
 		"skipped_processed":     atomic.LoadUint64(&bt.skippedAlreadyProcessed),
-	}).Info("Tracker health report")
+	}).Debug("Tracker health report")
 }
 
 // PublishDeposit publishes a deposit event
@@ -704,7 +957,5 @@ func (bt *BaseTracker) PublishWithdrawal(ctx context.Context, withdrawal *types.
 
 // IncrementTxCount increments the processed transaction counter
 func (bt *BaseTracker) IncrementTxCount(count uint64) {
-	bt.mu.Lock()
-	bt.processedTxs += count
-	bt.mu.Unlock()
+	atomic.AddUint64(&bt.processedTxs, count)
 }

@@ -81,7 +81,7 @@ type multiClient struct {
 	logger  *logrus.Logger
 }
 
-func newBaseClient(cfg *config.BitcoinConfig, logger *logrus.Logger, baseURL string) (*baseClient, error) {
+func newBaseClient(cfg *config.UTXOConfig, logger *logrus.Logger, baseURL string) (*baseClient, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("api_url not set")
 	}
@@ -206,7 +206,7 @@ func (c *baseClient) doWithBackoff(ctx context.Context, req *http.Request) (*htt
 	return resp, err
 }
 
-func newEsploraClient(cfg *config.BitcoinConfig, logger *logrus.Logger, baseURL string) (*esploraClient, error) {
+func newEsploraClient(cfg *config.UTXOConfig, logger *logrus.Logger, baseURL string) (*esploraClient, error) {
 	base, err := newBaseClient(cfg, logger, baseURL)
 	if err != nil {
 		return nil, err
@@ -221,7 +221,7 @@ func newEsploraClient(cfg *config.BitcoinConfig, logger *logrus.Logger, baseURL 
 	}, nil
 }
 
-func newBlockchainInfoClient(cfg *config.BitcoinConfig, logger *logrus.Logger, baseURL string) (*blockchainInfoClient, error) {
+func newBlockchainInfoClient(cfg *config.UTXOConfig, logger *logrus.Logger, baseURL string) (*blockchainInfoClient, error) {
 	base, err := newBaseClient(cfg, logger, baseURL)
 	if err != nil {
 		return nil, err
@@ -612,7 +612,7 @@ func (m *multiClient) ProviderStats() (map[string]uint64, map[string]uint64, str
 	return providers, errors, last
 }
 
-func newBitcoinClient(cfg *config.BitcoinConfig, logger *logrus.Logger) (Client, error) {
+func newBitcoinClient(cfg *config.UTXOConfig, logger *logrus.Logger) (Client, error) {
 	urls := make([]string, 0, len(cfg.APIURLs)+1)
 	urls = append(urls, cfg.APIURLs...)
 	if len(urls) == 0 && cfg.APIURL != "" {

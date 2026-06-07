@@ -42,13 +42,13 @@ type EthereumClient struct {
 	rpcClients   []*rpc.Client
 	statuses     []*ProviderStatus
 	rateLimiter  *rate.Limiter
-	config       *config.EthereumConfig
+	config       *config.EVMConfig
 	logger       *logrus.Logger
 	currentIndex int
 	mu           sync.RWMutex
 }
 
-func NewEthereumClient(cfg *config.EthereumConfig, logger *logrus.Logger) (*EthereumClient, error) {
+func NewEthereumClient(cfg *config.EVMConfig, logger *logrus.Logger) (*EthereumClient, error) {
 	if len(cfg.RPCURLs) == 0 {
 		return nil, fmt.Errorf("no RPC URLs provided")
 	}
@@ -153,7 +153,11 @@ func (c *EthereumClient) executeWithRetry(ctx context.Context, operation func(*e
 
 		// Check if this is a transaction type error - don't mark provider as unhealthy
 		if err != nil && strings.Contains(err.Error(), "transaction type not supported") {
-			c.logger.Debugf("Provider %s doesn't support transaction type, trying next provider", status.URL)
+			c.logger.WithFields(logrus.Fields{
+				"network":  c.config.Network,
+				"provider": status.URL,
+				"error":    err,
+			}).Debug("Provider does not support transaction type, trying next provider")
 			// Don't update provider status as unhealthy for transaction type errors
 			lastErr = err
 			continue
@@ -378,8 +382,7 @@ type EthBlockVerbose struct {
 }
 
 // GetBlockVerbose fetches a block with all transaction details by fetching each transaction individually.
-// This is more efficient for free RPC endpoints with rotation as it distributes the load across providers
-// and avoids expensive single calls to fetch full blocks with transaction bodies.
+// This is a fallback for RPC endpoints that cannot reliably return full block payloads.
 // Similar to Bitcoin's GetBlockVerbose, it uses concurrency control and rate limiting.
 func (c *EthereumClient) GetBlockVerbose(ctx context.Context, blockNumber uint64) (*EthBlockVerbose, error) {
 	// First, get the block header (lightweight call)
