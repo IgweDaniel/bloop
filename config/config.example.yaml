@@ -177,3 +177,34 @@ tron:
   retry_delay: 2s
   use_solidity: true
   is_active: false
+
+solana:
+  rpc_url: "https://api.mainnet-beta.solana.com"
+  rpc_urls:
+    - "https://api.mainnet-beta.solana.com"
+    - "https://solana-rpc.publicnode.com"
+    - "https://solana.drpc.org"
+    - "https://solana.leorpc.com/?api_key=FREE"
+    - "https://api.mainnet.solana.com"
+    - "https://public.rpc.solanavibestation.com"
+  ws_url: "wss://api.mainnet-beta.solana.com"
+  native_currency: "SOL"
+  tokens:
+    # Mainnet SPL USDT mint. Use devnet/test mints when running against devnet.
+    - currency: "USDT"
+      contract: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkYREu7XpRmb5sD9"
+      decimals: 6
+    # Mainnet SPL USDC mint.
+    - currency: "USDC"
+      contract: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+      decimals: 6
+  confirmations: 32
+  batch_size: 25
+  max_concurrent_blocks: 5
+  requeue_delay: 5s
+  requests_per_second: 5
+  requests_burst: 10
+  rpc_timeout: 30s
+  retry_attempts: 3
+  retry_delay: 2s
+  is_active: false

@@ -1,3 +1,26 @@
+# Release Notes — v0.6.0
+
+## Highlights
+
+- Added Solana (`SOLANA`) tracker support for native SOL transfers.
+- Added configurable SPL token monitoring for Solana using configured token mint addresses.
+- Added Solana JSON-RPC provider rotation, request rate limiting, and websocket slot subscriptions.
+- Added instruction-level Solana transfer parsing for system transfers and SPL `transfer` / `transferChecked` instructions.
+- Added Token-2022 transfer parsing support.
+- Added fallback SPL token balance-delta detection when transfer instructions are unavailable.
+
+## Configuration
+
+- Added a new top-level `solana` config block.
+- `solana.tokens[].contract` is the SPL token mint address.
+- Solana defaults to `confirmations: 32`.
+- Solana can be enabled with `solana.is_active: true`.
+
+## Notes
+
+- Skipped Solana slots are treated as normal and marked processed to avoid retry loops.
+- Public Solana RPC endpoints can rate-limit aggressively; production deployments should use dedicated provider keys where possible.
+
 # Release Notes — v0.5.0
 
 ## Breaking Changes
