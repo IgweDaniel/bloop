@@ -1,6 +1,6 @@
 # Bloop Blockchain Monitor
 
-A high-performance, standalone blockchain monitoring service written in Go. Supports Ethereum (ETH and USDT), Binance Smart Chain (BNB and USDT), and Bitcoin (BTC) with a flexible multi-chain architecture designed for easy expansion to additional EVM-compatible and non-EVM blockchains.
+A high-performance, standalone blockchain monitoring service written in Go. Supports Ethereum, Binance Smart Chain, TRON, Bitcoin, and Litecoin with native coin monitoring plus configurable token contracts such as USDT and USDC.
 
 ## Features
 
@@ -85,6 +85,11 @@ make test-listener
 curl -X POST http://localhost:8080/api/v1/wallets/watch \
   -H "Content-Type: application/json" \
   -d '{"network": "ETH", "address": "0x742d35Cc6634C0532925a3b8D400E4C0d5C7c6B4", "wallet_id": "user-123"}'
+
+# Watch a Litecoin wallet
+curl -X POST http://localhost:8080/api/v1/wallets/watch \
+  -H "Content-Type: application/json" \
+  -d '{"network": "LTC", "address": "ltc1qexampleaddress", "wallet_id": "user-456"}'
 ```
 
 ### Docker Compose starts:
@@ -114,10 +119,33 @@ ethereum:
     - "https://eth.llamarpc.com"
     - "https://rpc.ankr.com/eth"
   ws_url: "wss://eth.llamarpc.com"
-  usdt_contract: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+  tokens:
+    - currency: "USDT"
+      contract: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+      decimals: 6
+    - currency: "USDC"
+      contract: "<usdc-contract-address>"
+      decimals: 6
   confirmations: 5
   batch_size: 50
   max_concurrent_blocks: 5
+
+utxo:
+  - network: "BTC"
+    native_currency: "BTC"
+    api_urls:
+      - "https://mempool.space/testnet/api"
+      - "https://blockstream.info/testnet/api"
+    confirmations: 1
+    batch_size: 10
+    max_concurrent_blocks: 5
+  - network: "LTC"
+    native_currency: "LTC"
+    api_urls:
+      - "https://litecoinspace.org/api"
+    confirmations: 6
+    batch_size: 10
+    max_concurrent_blocks: 5
 
 redis:
   url: "redis://localhost:6379"
@@ -133,7 +161,6 @@ rabbitmq:
 ```bash
 ETH_RPC_URLS="https://eth.llamarpc.com,https://rpc.ankr.com/eth"
 ETH_WS_URL="wss://eth.llamarpc.com"
-USDT_CONTRACT_ADDRESS="0xdAC17F958D2ee523a2206206994597C13D831ec7"
 REDIS_URL="redis://localhost:6379"
 RABBITMQ_URL="amqp://bloop:bloop123@localhost:5672/"
 LOG_LEVEL="info"
@@ -199,16 +226,16 @@ curl http://localhost:8080/api/v1/trackers/stats
 curl http://localhost:8080/api/v1/networks
 ```
 
-### Omini RPC URL (Extended RPC)
+### EVM Block Fetching
 
-Some Ethereum RPC providers expose extended methods or reliably return full blocks with all transactions in a single call. We call this the omini RPC. The tracker uses it narrowly to fetch full block data (with transactions) while using the regular RPC pool for everything else (current block height, receipts, WS, etc.).
+By default, EVM trackers use `block_fetch_mode: full`, which calls `eth_getBlockByNumber` with full transactions on the regular RPC pool. The processor scans the returned transaction objects first, then fetches receipts only for transactions that can matter:
 
-- Purpose: Reduce retries and provider inconsistencies when fetching full block payloads.
-- Scope: Only used for `eth_getBlockByNumber` (full block with transactions). All other calls use the regular client pool.
-- Providers: Alchemy (recommended), or any paid/free RPC that reliably returns full blocks.
-- Cost control: Responses are cached briefly and deleted as soon as blocks are processed.
+- Plain native transfers where `to` or `from` is watched.
+- Direct calls to configured token contracts.
 
-Configure via `ethereum.omini_rpc_url` in your config (see example below). If not set, the tracker falls back to the regular client for full block fetches which in most cases fail.
+Use `block_fetch_mode: light` only if a provider cannot serve full block payloads reliably. In light mode, the tracker fetches transaction hashes first and then fetches each transaction individually.
+
+`omini_rpc_urls` are optional fallback RPCs for full block fetch failures. Regular RPCs are tried first.
 
 ### Get Watched Wallets
 
@@ -331,6 +358,13 @@ func (f *DefaultTrackerFactory) CreateTracker(network types.BlockchainType) (Tra
 bitcoin:
   rpc_url: "https://bitcoin-rpc.com"
   confirmations: 6
+
+utxo:
+  - network: "LTC"
+    native_currency: "LTC"
+    api_urls:
+      - "https://litecoinspace.org/api"
+    confirmations: 6
 ```
 
 ## Development

@@ -20,32 +20,42 @@ import (
 
 type BitcoinProcessor struct {
 	storage     storage.Storage
-	config      *config.BitcoinConfig
+	config      *config.UTXOConfig
 	logger      *logrus.Logger
 	baseTracker *base.BaseTracker
 	rpc         Client
 	wsURL       string
 
-	tipTTL time.Duration
+	network  types.BlockchainType
+	currency types.Currency
+	tipTTL   time.Duration
 }
 
 func NewBitcoinProcessor(
-	cfg *config.BitcoinConfig,
+	cfg *config.UTXOConfig,
 	storage storage.Storage,
 	logger *logrus.Logger,
 ) (*BitcoinProcessor, error) {
+	if cfg.Network == "" {
+		return nil, fmt.Errorf("UTXO network is required")
+	}
+	if cfg.NativeCurrency == "" {
+		return nil, fmt.Errorf("native currency is required for UTXO network %s", cfg.Network)
+	}
 	return &BitcoinProcessor{
-		storage: storage,
-		config:  cfg,
-		logger:  logger,
-		tipTTL:  2 * time.Second,
+		storage:  storage,
+		config:   cfg,
+		logger:   logger,
+		network:  cfg.Network,
+		currency: cfg.NativeCurrency,
+		tipTTL:   2 * time.Second,
 	}, nil
 }
 
 func (bp *BitcoinProcessor) SetBaseTracker(baseTracker *base.BaseTracker) {
 	bp.baseTracker = baseTracker
 }
-func (bp *BitcoinProcessor) GetNetwork() types.BlockchainType { return types.Bitcoin }
+func (bp *BitcoinProcessor) GetNetwork() types.BlockchainType { return bp.network }
 func (bp *BitcoinProcessor) InFlightTxs() uint64 {
 	if rc, ok := bp.rpc.(interface{ InFlightTxs() uint64 }); ok {
 		return rc.InFlightTxs()
@@ -69,7 +79,7 @@ func (bp *BitcoinProcessor) InitializeProviders(ctx context.Context) error {
 	}
 	bp.rpc = rc
 	bp.wsURL = bp.config.WSURL
-	bp.logger.Info("Bitcoin RPC initialized")
+	bp.logger.Infof("%s RPC initialized", bp.network)
 	return nil
 }
 
@@ -273,7 +283,7 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 				Address: addr,
 				Amount:  fmt.Sprintf("%.8f", amount),
 			})
-			walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, addr)
+			walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, bp.network, addr)
 			if err != nil {
 				return false, err
 			}
@@ -300,7 +310,7 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 					continue
 				}
 				addr := vout.ScriptPubKey.Addresses[0]
-				_, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, addr)
+				_, isWatched, err := bp.storage.IsWatchedWallet(ctx, bp.network, addr)
 				if err != nil {
 					return false, err
 				}
@@ -324,8 +334,8 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 					ToAddress:     externalTo,
 					Outputs:       outputs,
 					Amount:        fmt.Sprintf("%.8f", externalAmount),
-					Currency:      types.BTC,
-					Network:       types.Bitcoin,
+					Currency:      bp.currency,
+					Network:       bp.network,
 					BlockNumber:   blockNumber,
 					Confirmations: uint64(bp.config.Confirmations),
 					Timestamp:     time.Unix(block.Time, 0).UTC(),
@@ -350,7 +360,7 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 				continue
 			}
 			for _, addr := range vout.ScriptPubKey.Addresses {
-				walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, types.Bitcoin, addr)
+				walletID, isWatched, err := bp.storage.IsWatchedWallet(ctx, bp.network, addr)
 				if err != nil {
 					return false, err
 				}
@@ -370,8 +380,8 @@ func (bp *BitcoinProcessor) ProcessBlock(ctx context.Context, blockNumber uint64
 					FromAddress:   fromAddress,
 					Inputs:        inputs,
 					Amount:        fmt.Sprintf("%.8f", vout.Value),
-					Currency:      types.BTC,
-					Network:       types.Bitcoin,
+					Currency:      bp.currency,
+					Network:       bp.network,
 					BlockNumber:   blockNumber,
 					Confirmations: uint64(bp.config.Confirmations),
 					Timestamp:     time.Unix(block.Time, 0).UTC(),

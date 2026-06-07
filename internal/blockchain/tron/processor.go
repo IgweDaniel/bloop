@@ -21,29 +21,35 @@ import (
 var transferEventSignatureHex = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)")).Hex()
 
 type Processor struct {
-	client       *Client
-	storage      storage.Storage
-	config       *config.TronConfig
-	logger       *logrus.Logger
-	baseTracker  *base.BaseTracker
-	usdtContract string
+	client         *Client
+	storage        storage.Storage
+	config         *config.TronConfig
+	logger         *logrus.Logger
+	baseTracker    *base.BaseTracker
+	tokenContracts map[string]config.TokenConfig
 }
 
 func NewProcessor(cfg *config.TronConfig, storage storage.Storage, logger *logrus.Logger) (*Processor, error) {
-	usdtContract := ""
-	if cfg.USDTContract != "" {
-		hexAddr, err := addressToHex41(cfg.USDTContract)
-		if err != nil {
-			return nil, fmt.Errorf("invalid TRON USDT contract address: %w", err)
+	tokenContracts := make(map[string]config.TokenConfig, len(cfg.Tokens))
+	for _, token := range cfg.Tokens {
+		if strings.TrimSpace(token.Contract) == "" {
+			return nil, fmt.Errorf("token %s has empty contract", token.Currency)
 		}
-		usdtContract = hexAddr
+		if strings.TrimSpace(token.Currency) == "" {
+			return nil, fmt.Errorf("token contract %s has empty currency", token.Contract)
+		}
+		hexAddr, err := addressToHex41(token.Contract)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TRON token contract address %q: %w", token.Contract, err)
+		}
+		tokenContracts[hexAddr] = token
 	}
 
 	return &Processor{
-		storage:      storage,
-		config:       cfg,
-		logger:       logger,
-		usdtContract: usdtContract,
+		storage:        storage,
+		config:         cfg,
+		logger:         logger,
+		tokenContracts: tokenContracts,
 	}, nil
 }
 
@@ -163,7 +169,7 @@ func (p *Processor) processTransaction(ctx context.Context, blockNumber uint64, 
 			if processedSmartContractLogs {
 				continue
 			}
-			if !p.isConfiguredUSDTTrigger(contract) {
+			if !p.isConfiguredTokenTrigger(contract) {
 				continue
 			}
 			processedSmartContractLogs = true
@@ -258,7 +264,7 @@ func (p *Processor) processTRXTransfer(ctx context.Context, blockNumber uint64, 
 }
 
 func (p *Processor) processTRC20TransferLogs(ctx context.Context, blockNumber uint64, timestamp time.Time, txID string, info transactionInfoResponse) error {
-	if p.usdtContract == "" {
+	if len(p.tokenContracts) == 0 {
 		return nil
 	}
 
@@ -272,7 +278,8 @@ func (p *Processor) processTRC20TransferLogs(ctx context.Context, blockNumber ui
 			p.logger.Debugf("Skipping TRON log with invalid contract address %q: %v", log.Address, err)
 			continue
 		}
-		if contractHex != p.usdtContract {
+		token, ok := p.tokenContracts[contractHex]
+		if !ok {
 			continue
 		}
 		if len(log.Topics) < 3 || !strings.EqualFold(normalizeTopic(log.Topics[0]), normalizeTopic(transferEventSignatureHex)) {
@@ -310,7 +317,7 @@ func (p *Processor) processTRC20TransferLogs(ctx context.Context, blockNumber ui
 		}
 
 		networkFee := formatSun(big.NewInt(info.Fee))
-		amountText := formatToken(amount, p.config.USDTDecimals)
+		amountText := formatToken(amount, token.Decimals)
 
 		if isFromWatched && !isToWatched {
 			withdrawal := &types.WalletWithdrawal{
@@ -319,7 +326,7 @@ func (p *Processor) processTRC20TransferLogs(ctx context.Context, blockNumber ui
 				WalletAddress: from,
 				ToAddress:     to,
 				Amount:        amountText,
-				Currency:      types.USDT,
+				Currency:      types.Currency(token.Currency),
 				Network:       p.GetNetwork(),
 				BlockNumber:   blockNumber,
 				Confirmations: uint64(p.config.Confirmations),
@@ -329,7 +336,7 @@ func (p *Processor) processTRC20TransferLogs(ctx context.Context, blockNumber ui
 			}
 			if p.baseTracker != nil {
 				if err := p.baseTracker.PublishWithdrawal(ctx, withdrawal); err != nil {
-					p.logger.Errorf("Failed to publish TRC20 withdrawal: %v", err)
+					p.logger.Errorf("Failed to publish TRC20 %s withdrawal: %v", token.Currency, err)
 				}
 			}
 		}
@@ -344,7 +351,7 @@ func (p *Processor) processTRC20TransferLogs(ctx context.Context, blockNumber ui
 			WalletAddress: to,
 			FromAddress:   from,
 			Amount:        amountText,
-			Currency:      types.USDT,
+			Currency:      types.Currency(token.Currency),
 			Network:       p.GetNetwork(),
 			BlockNumber:   blockNumber,
 			Confirmations: uint64(p.config.Confirmations),
@@ -354,7 +361,7 @@ func (p *Processor) processTRC20TransferLogs(ctx context.Context, blockNumber ui
 		}
 		if p.baseTracker != nil {
 			if err := p.baseTracker.PublishDeposit(ctx, deposit); err != nil {
-				p.logger.Errorf("Failed to publish TRC20 deposit: %v", err)
+				p.logger.Errorf("Failed to publish TRC20 %s deposit: %v", token.Currency, err)
 			}
 		}
 	}
@@ -386,8 +393,8 @@ func (p *Processor) isSuccessfulTransaction(tx transactionResponse) bool {
 	return strings.EqualFold(tx.Ret[0].ContractRet, "SUCCESS")
 }
 
-func (p *Processor) isConfiguredUSDTTrigger(contract contractResponse) bool {
-	if p.usdtContract == "" {
+func (p *Processor) isConfiguredTokenTrigger(contract contractResponse) bool {
+	if len(p.tokenContracts) == 0 {
 		return false
 	}
 
@@ -402,7 +409,8 @@ func (p *Processor) isConfiguredUSDTTrigger(contract contractResponse) bool {
 		p.logger.Debugf("Skipping TRON smart contract trigger with invalid contract address %q: %v", trigger.ContractAddress, err)
 		return false
 	}
-	return contractHex == p.usdtContract
+	_, ok := p.tokenContracts[contractHex]
+	return ok
 }
 
 func (p *Processor) networkFeeFromBlockInfo(txID string, txInfos map[string]transactionInfoResponse) string {

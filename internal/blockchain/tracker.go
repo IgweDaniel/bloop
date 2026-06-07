@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/igwedaniel/bloop/internal/blockchain/base"
@@ -41,20 +42,33 @@ type Tracker interface {
 }
 
 type TrackerManager struct {
-	trackers  map[types.BlockchainType]Tracker
-	cfg       *config.Config
-	storage   storage.Storage
-	publisher messaging.Publisher
-	logger    *logrus.Logger
+	trackers    map[types.BlockchainType]Tracker
+	evmConfigs  map[types.BlockchainType]*config.EVMConfig
+	utxoConfigs map[types.BlockchainType]*config.UTXOConfig
+	cfg         *config.Config
+	storage     storage.Storage
+	publisher   messaging.Publisher
+	logger      *logrus.Logger
 }
 
 func NewTrackerManager(cfg *config.Config, storage storage.Storage, publisher messaging.Publisher, logger *logrus.Logger) *TrackerManager {
+	evmConfigs := make(map[types.BlockchainType]*config.EVMConfig, len(cfg.EVM))
+	for i := range cfg.EVM {
+		evmConfigs[cfg.EVM[i].Network] = &cfg.EVM[i]
+	}
+	utxoConfigs := make(map[types.BlockchainType]*config.UTXOConfig, len(cfg.UTXO))
+	for i := range cfg.UTXO {
+		utxoConfigs[cfg.UTXO[i].Network] = &cfg.UTXO[i]
+	}
+
 	return &TrackerManager{
-		trackers:  make(map[types.BlockchainType]Tracker),
-		cfg:       cfg,
-		storage:   storage,
-		publisher: publisher,
-		logger:    logger,
+		trackers:    make(map[types.BlockchainType]Tracker),
+		evmConfigs:  evmConfigs,
+		utxoConfigs: utxoConfigs,
+		cfg:         cfg,
+		storage:     storage,
+		publisher:   publisher,
+		logger:      logger,
 	}
 }
 
@@ -79,19 +93,8 @@ func (tm *TrackerManager) StartTracker(ctx context.Context, network types.Blockc
 		}
 	}
 
-	switch network {
-	case types.Ethereum, types.BSC:
-		var proc *ethereum.EthereumProcessor
-		var perr error
-		var cfg *config.EthereumConfig
-
-		if network == types.Ethereum {
-			cfg = &tm.cfg.Ethereum
-		} else {
-			cfg = &tm.cfg.Bsc
-		}
-
-		proc, perr = ethereum.NewEthereumProcessor(cfg, tm.storage, tm.logger, network)
+	if cfg, ok := tm.evmConfigs[network]; ok {
+		proc, perr := ethereum.NewEthereumProcessor(cfg, tm.storage, tm.logger)
 		if perr != nil {
 			return fmt.Errorf("failed to create %s processor: %w", network, perr)
 		}
@@ -101,28 +104,31 @@ func (tm *TrackerManager) StartTracker(ctx context.Context, network types.Blockc
 		proc.SetBaseTracker(bt)
 		tracker = bt
 
-	case types.Bitcoin:
-		bproc, perr := bitcoin.NewBitcoinProcessor(&tm.cfg.Bitcoin, tm.storage, tm.logger)
+	} else if cfg, ok := tm.utxoConfigs[network]; ok {
+		bproc, perr := bitcoin.NewBitcoinProcessor(cfg, tm.storage, tm.logger)
 		if perr != nil {
-			return fmt.Errorf("failed to create Bitcoin processor: %w", perr)
+			return fmt.Errorf("failed to create %s processor: %w", network, perr)
 		}
-		bcfg := buildBaseCfg(tm.cfg.Bitcoin.Confirmations, tm.cfg.Bitcoin.BatchSize, tm.cfg.Bitcoin.MaxConcurrentBlocks, tm.cfg.Bitcoin.RequeueDelay)
+		bcfg := buildBaseCfg(cfg.Confirmations, cfg.BatchSize, cfg.MaxConcurrentBlocks, cfg.RequeueDelay)
 		bbt := base.NewBaseTracker(bproc, tm.storage, tm.publisher, tm.logger, bcfg)
 		bproc.SetBaseTracker(bbt)
 		tracker = bbt
 
-	case types.Tron:
-		tproc, perr := tron.NewProcessor(&tm.cfg.Tron, tm.storage, tm.logger)
-		if perr != nil {
-			return fmt.Errorf("failed to create TRON processor: %w", perr)
-		}
-		tcfg := buildBaseCfg(tm.cfg.Tron.Confirmations, tm.cfg.Tron.BatchSize, tm.cfg.Tron.MaxConcurrentBlocks, tm.cfg.Tron.RequeueDelay)
-		tbt := base.NewBaseTracker(tproc, tm.storage, tm.publisher, tm.logger, tcfg)
-		tproc.SetBaseTracker(tbt)
-		tracker = tbt
+	} else {
+		switch network {
+		case types.Tron:
+			tproc, perr := tron.NewProcessor(&tm.cfg.Tron, tm.storage, tm.logger)
+			if perr != nil {
+				return fmt.Errorf("failed to create TRON processor: %w", perr)
+			}
+			tcfg := buildBaseCfg(tm.cfg.Tron.Confirmations, tm.cfg.Tron.BatchSize, tm.cfg.Tron.MaxConcurrentBlocks, tm.cfg.Tron.RequeueDelay)
+			tbt := base.NewBaseTracker(tproc, tm.storage, tm.publisher, tm.logger, tcfg)
+			tproc.SetBaseTracker(tbt)
+			tracker = tbt
 
-	default:
-		return fmt.Errorf("unsupported blockchain network: %s", network)
+		default:
+			return fmt.Errorf("unsupported blockchain network: %s", network)
+		}
 	}
 
 	if err := tracker.Start(ctx); err != nil {
@@ -187,12 +193,13 @@ func (tm *TrackerManager) GetStats() map[types.BlockchainType]types.TrackerStats
 }
 
 func (tm *TrackerManager) AddWatchedWallet(ctx context.Context, network types.BlockchainType, address, walletID string) error {
-	tracker, exists := tm.trackers[network]
-	if !exists {
-		return fmt.Errorf("no tracker found for %s", network)
+	if !tm.IsSupported(network) {
+		return fmt.Errorf("unsupported blockchain network: %s", network)
 	}
 
-	if network == types.Tron {
+	if _, ok := tm.evmConfigs[network]; ok {
+		address = strings.ToLower(address)
+	} else if network == types.Tron {
 		normalized, err := tron.NormalizeAddress(address)
 		if err != nil {
 			return fmt.Errorf("invalid TRON address: %w", err)
@@ -200,16 +207,21 @@ func (tm *TrackerManager) AddWatchedWallet(ctx context.Context, network types.Bl
 		address = normalized
 	}
 
-	return tracker.AddWatchedWallet(ctx, address, walletID)
+	if tracker, exists := tm.trackers[network]; exists {
+		return tracker.AddWatchedWallet(ctx, address, walletID)
+	}
+
+	return tm.storage.AddWatchedWallet(ctx, network, address, walletID)
 }
 
 func (tm *TrackerManager) RemoveWatchedWallet(ctx context.Context, network types.BlockchainType, address string) error {
-	tracker, exists := tm.trackers[network]
-	if !exists {
-		return fmt.Errorf("no tracker found for %s", network)
+	if !tm.IsSupported(network) {
+		return fmt.Errorf("unsupported blockchain network: %s", network)
 	}
 
-	if network == types.Tron {
+	if _, ok := tm.evmConfigs[network]; ok {
+		address = strings.ToLower(address)
+	} else if network == types.Tron {
 		normalized, err := tron.NormalizeAddress(address)
 		if err != nil {
 			return fmt.Errorf("invalid TRON address: %w", err)
@@ -217,12 +229,23 @@ func (tm *TrackerManager) RemoveWatchedWallet(ctx context.Context, network types
 		address = normalized
 	}
 
-	return tracker.RemoveWatchedWallet(ctx, address)
+	if tracker, exists := tm.trackers[network]; exists {
+		return tracker.RemoveWatchedWallet(ctx, address)
+	}
+
+	return tm.storage.RemoveWatchedWallet(ctx, network, address)
 }
 
 func (tm *TrackerManager) IsSupported(network types.BlockchainType) bool {
+	if _, ok := tm.evmConfigs[network]; ok {
+		return true
+	}
+	if _, ok := tm.utxoConfigs[network]; ok {
+		return true
+	}
+
 	switch network {
-	case types.Ethereum, types.BSC, types.Bitcoin, types.Tron:
+	case types.Tron:
 		return true
 	default:
 		return false
@@ -230,5 +253,12 @@ func (tm *TrackerManager) IsSupported(network types.BlockchainType) bool {
 }
 
 func (tm *TrackerManager) GetSupportedNetworks() []types.BlockchainType {
-	return []types.BlockchainType{types.Ethereum, types.BSC, types.Bitcoin, types.Tron}
+	networks := []types.BlockchainType{types.Tron}
+	for _, chain := range tm.cfg.EVM {
+		networks = append(networks, chain.Network)
+	}
+	for _, chain := range tm.cfg.UTXO {
+		networks = append(networks, chain.Network)
+	}
+	return networks
 }
